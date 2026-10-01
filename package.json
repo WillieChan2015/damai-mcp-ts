@@ -1,0 +1,31 @@
+{
+  "name": "damai-mcp-ts",
+  "version": "0.2.3",
+  "description": "Android Emulator MCP for ticket-grabbing automation (大麦 / 猫眼 / 飞猪) — TypeScript port of damai-mcp",
+  "type": "module",
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "bun": ">=1.2",
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "serve": "bun run src/cli.ts serve"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "5.9.3",
+    "vitest": "^3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@xmldom/xmldom": "^0.9",
+    "commander": "^14",
+    "jimp": "^1",
+    "pino": "^9",
+    "pino-roll": "^4.0.0",
+    "xpath": "^0.0.34",
+    "zod": "^3"
+  }
+}

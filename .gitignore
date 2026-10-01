@@ -1,0 +1,42 @@
+# Node / pnpm
+node_modules/
+.pnpm-store/
+
+# 构建产物（当前 tsconfig 为 noEmit，保留以防后续加构建）
+dist/
+*.tsbuildinfo
+
+# 测试与覆盖率（vitest）
+coverage/
+
+# Logs（CLI --log-dir 默认 ./logs；pino-roll 产出 damai_mcp.<date>.<n>.log）
+logs/
+*.log
+
+# 运行时调试截图（damai_grab 失败时自动生成）
+damai_shots/
+
+# Sensitive (never commit)
+.env
+.env.*
+*.cookie
+cookies/
+config.local.json
+accounts.local.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code 内部日志（绝不入仓）
+.claude/
+
+# APK 文件（太大不入仓，发布到 releases 即可）
+apks/
+*.apk
