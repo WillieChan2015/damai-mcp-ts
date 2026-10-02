@@ -11,9 +11,12 @@
  *  全部子命令与参数。可直接 `bun src/cli.ts ...` 执行。）
  */
 
-import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { pathToFileURL } from "node:url";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -105,6 +108,23 @@ export async function main(): Promise<void> {
     .action(async () => {
       console.log(`damai-mcp-ts ${VERSION}`);
     });
+
+  // CLI: web（可视化控制台，Next.js 16 全栈应用位于仓库根 web/，
+  // 计划见 docs/plans/web-console-plan.md）
+  const webP = program
+    .command("web")
+    .description("启动可视化控制台（默认仅绑定本机 127.0.0.1）");
+  webP.addOption(
+    new Option("--mode <mode>", "dev | start")
+      .choices(["dev", "start"])
+      .default("start"),
+  );
+  webP.option("--host <host>", "绑定地址（默认仅本机）", "127.0.0.1");
+  webP.option("--port <port>", "端口", pyIntArg, 3000);
+  webP.option("--token <token>", "访问 token（缺省自动生成并打印）");
+  webP.action(async (opts) => {
+    await cmdWeb(opts.mode, opts.host, opts.port, opts.token);
+  });
 
   // CLI: ntp-sync
   const ntpP = program
@@ -519,6 +539,69 @@ function pyValueRepr(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(pyValueRepr).join(", ")}]`;
   if (typeof v === "number") return String(v);
   return String(v);
+}
+
+// ---- web ---------------------------------------------------------------------
+
+/**
+ * web 子命令：启动可视化控制台（Next.js 16 全栈应用，位于仓库根 `web/`）。
+ *
+ * 安全护栏（docs/plans/web-console-plan.md D6）：
+ * - 默认绑定 127.0.0.1；`--host` 指向非回环地址时打印醒目警告；
+ * - token 未显式提供时自动生成并打印，经 `DAMAI_WEB_TOKEN` 注入 Next 进程，
+ *   由 `web/src/middleware.ts` 校验（x-web-token 头或 /api/token 换取的 Cookie）。
+ */
+async function cmdWeb(
+  mode: "dev" | "start",
+  host: string,
+  port: number,
+  token?: string,
+): Promise<void> {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const webRoot = join(repoRoot, "web");
+  const nextEntry = join(webRoot, "node_modules", "next", "dist", "bin", "next");
+  if (!existsSync(nextEntry)) {
+    throw new Error(`未找到 Next.js（${nextEntry}）。请先在仓库根执行 pnpm install。`);
+  }
+  if (mode === "start" && !existsSync(join(webRoot, ".next", "BUILD_ID"))) {
+    throw new Error(
+      "web 尚未构建（缺少 web/.next/BUILD_ID）。请先执行 pnpm -C web build，或改用 --mode dev。",
+    );
+  }
+
+  const effectiveToken = token ?? randomBytes(16).toString("hex");
+  const loopback = host === "localhost" || host.startsWith("127.") || host === "::1";
+  if (!loopback) {
+    logger.warning(
+      `web 控制台绑定在非回环地址 ${host}：局域网内任何持有 token 的人都能操控你的手机/模拟器！`,
+    );
+  }
+  logger.info(`web 控制台: http://${host}:${port} (mode=${mode})`);
+  logger.info(
+    `访问 token: ${effectiveToken}  （浏览器打开 /api/token?token=<token> 换取 Cookie，或请求携带 x-web-token 头）`,
+  );
+
+  // 用显式 node 而非 process.execPath：cli 可由 bun 运行，而 next 交给 node 更稳
+  const child = spawn("node", [nextEntry, mode, "-H", host, "-p", String(port)], {
+    cwd: webRoot,
+    stdio: "inherit",
+    env: { ...process.env, DAMAI_WEB_TOKEN: effectiveToken },
+  });
+  const forward = (signal: NodeJS.Signals) => {
+    child.kill(signal);
+  };
+  process.on("SIGINT", () => forward("SIGINT"));
+  process.on("SIGTERM", () => forward("SIGTERM"));
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    child.once("exit", (code) => {
+      if (code === 0) {
+        resolvePromise();
+      } else {
+        rejectPromise(new Error(`next ${mode} 退出码 ${code ?? "signal"}`));
+      }
+    });
+    child.once("error", rejectPromise);
+  });
 }
 
 // 对应 Python `if __name__ == "__main__": main()`

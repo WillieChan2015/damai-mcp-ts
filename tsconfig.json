@@ -7,5 +7,7 @@
     "types": ["node"],
     "skipLibCheck": true,
     "noEmit": true
-  }
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "examples/**/*.ts"],
+  "exclude": ["web", "node_modules"]
 }
