@@ -540,6 +540,54 @@ describe("run_checklist（open_time + 去抖门）", () => {
     expect(res.saleTrigger).toBeNull();
   });
 
+  // ---- 外部停止信号（web 控制台取消，docs/plans/web-console-plan.md D9） ----
+
+  it("runChecklist 尊重外部 stopEvent：预热前已置位 → cancelled，不预热不 fire", async () => {
+    loginMock.mockResolvedValue({ logged_in: true });
+    grabMock.mockResolvedValue({ status: "submitted", elapsed_ms: 1, item_id: "1" });
+    const stopEvent: StopEvent = { isSet: () => true };
+    const res = await runChecklist("127.0.0.1:5555", "1", {
+      openTime: "2099-01-01 10:00:00",
+      preheatSeconds: 5,
+      stopEvent,
+    });
+    expect(res.status).toBe("cancelled");
+    expect(res.error).toContain("cancelled_by_user");
+    // 预热与 fire 都没有发生
+    expect(openMock).not.toHaveBeenCalled();
+    expect(grabMock).not.toHaveBeenCalled();
+  });
+
+  it("候场阶段置位 stopEvent → cancelled，Phase 4 fire 不执行（gate 路径）", async () => {
+    loginMock.mockResolvedValue({ logged_in: true });
+    openMock.mockResolvedValue({ item_id: "1", loaded: true, elapsed_ms: 0 });
+    grabMock.mockResolvedValue({ status: "submitted", elapsed_ms: 1, item_id: "1" });
+    // 倒计时节点恒在场：基线建成后门持续武装，候场循环持续轮询
+    dumpUiMock.mockResolvedValue([countdownNode()]);
+    swipeMock.mockResolvedValue(undefined);
+    screenshotMock.mockResolvedValue(Buffer.alloc(0));
+
+    // fireAt ≈ now+5s（≤10s → countdownLoop 用 1s 粗 tick）；首个 progress tick
+    // 置位停止信号，另有 2s 兜底防止调度抖动下 progressCb 未被调用
+    let stopped = false;
+    const t0Ms = Date.now();
+    const stopEvent: StopEvent = { isSet: () => stopped || Date.now() - t0Ms > 2000 };
+    const openTime = strftime("%Y-%m-%d %H:%M:%S", new Date(Date.now() + 8000));
+    const res = await runChecklist("127.0.0.1:5555", "1", {
+      openTime,
+      preheatSeconds: 3,
+      signalGateOptions: { gatePollMs: 5 },
+      stopEvent,
+      onProgress: () => {
+        stopped = true;
+      },
+    });
+
+    expect(res.status).toBe("cancelled");
+    expect(res.error).toContain("cancelled_by_user");
+    expect(grabMock).not.toHaveBeenCalled();
+  });
+
   it("NTP 成功时 targetUnix 应用 offset：timer 路径提前 offset 触发，且 Phase 4 立即模式", async () => {
     loginMock.mockResolvedValue({ logged_in: true });
     openMock.mockResolvedValue({ item_id: "1", loaded: true, elapsed_ms: 0 });

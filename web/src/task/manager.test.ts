@@ -171,4 +171,60 @@ describe("TaskManager", () => {
     expect(() => mgr.cancel("nope")).toThrow("任务不存在");
     expect(mgr.get("nope")).toBeNull();
   });
+
+  it("subscribe：backlog 回放 + 实时推送 + 退订；result 存入快照", async () => {
+    const mgr = new TaskManager();
+    const snap = mgr.start({
+      kind: "custom",
+      deviceId: "dev-sub",
+      runner: async ({ onProgress, stopEvent }) => {
+        onProgress("early-1");
+        onProgress("early-2");
+        await new Promise((r) => setTimeout(r, 30));
+        onProgress("late-1");
+        while (!stopEvent.isSet()) {
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        return { summary: "done" };
+      },
+    });
+
+    // 任务未结束时订阅：先回放 2 行 backlog
+    const received: Array<{ line: string; index: number }> = [];
+    const unsub = mgr.subscribe(snap.id, 0, (line, index) => received.push({ line, index }));
+    expect(received.map((r) => r.line)).toEqual(["early-1", "early-2"]);
+
+    // 退订后不再收到实时行；取消任务使其终结
+    unsub();
+    mgr.cancel(snap.id);
+
+    await mgr.whenSettled(snap.id);
+    const done = mgr.get(snap.id);
+    expect(done?.status).toBe("cancelled");
+    expect(done?.result).toEqual({ summary: "done" });
+    expect(done?.progressTotal).toBeGreaterThanOrEqual(3);
+    expect(done?.progress[done.progress.length - 1]).toBe("late-1");
+
+    // 已终结任务订阅：只回放 backlog，不抛错
+    const after: string[] = [];
+    mgr.subscribe(snap.id, 0, (line) => after.push(line));
+    expect(after).toContain("late-1");
+  });
+
+  it("subscribe 指定 fromIndexExclusive：只收其后的事件（断线续传语义）", async () => {
+    const mgr = new TaskManager();
+    const snap = mgr.start({
+      kind: "custom",
+      deviceId: "dev-sub2",
+      runner: async ({ onProgress }) => {
+        onProgress("l0");
+        onProgress("l1");
+        onProgress("l2");
+      },
+    });
+    await mgr.whenSettled(snap.id);
+    const seen: string[] = [];
+    mgr.subscribe(snap.id, 2, (line) => seen.push(line));
+    expect(seen).toEqual(["l2"]);
+  });
 });

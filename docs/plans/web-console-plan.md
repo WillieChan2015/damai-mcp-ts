@@ -124,16 +124,29 @@ damai-mcp-ts/                                  ← 仓库根 = core 包（原样
 - **验收结果**：`next dev` 首页 200；鉴权链路全通（无 token 401 / x-web-token 200 / `/api/token` 换 Cookie 307 + Cookie 200）；instrumentation 日志恰好一次；鉴权文件采用 Next 16 新规范 `src/proxy.ts`（middleware.ts 已废弃）；`pnpm -C web build`（Turbopack）成功；根 typecheck 干净；core 测试 16 文件 274 用例全绿零影响。
 - 实施备注：用户全局 npm 镜像（`~/.npmrc` → `npmregistry.getapk.cn`）超时，`web/.npmrc` 按仓库既有惯例指向官方 registry；create-next-app 生成的嵌套 `web/pnpm-workspace.yaml` 已并入根工作区配置。
 
-### Phase 1 — MVP 骨架（设备 + 任务 + 进度）
+### Phase 1 — MVP 骨架（设备 + 任务 + 进度）✅（2026-10-02 完成）
 
-- [ ] `src/schemas/`：任务参数共享 schema（设备/场次/档位/观演人/开票时间），与 MCP 参数语义对齐
-- [ ] 设备页：RSC 快照 `DeviceManager.listDevices()` + Server Action `connect/disconnect`
-- [ ] 任务页：Server Action `startTask/cancelTask` → TaskManager（启动 `damaiGrab`，登记 stopEvent/progressCb）；
-  RHF 表单 + zod resolver；任务列表 TanStack Table
-- [ ] `app/api/tasks/[id]/events/route.ts`：SSE（progressCb → 事件流，心跳注释行）
-- [ ] 测试：TaskManager 互斥/取消单测；handlers 纯函数测试；关键组件 `@testing-library/react` 冒烟
-- **验收**：`bun run src/cli.ts web` 后浏览器完成"选设备 → 填抢票参数 → 启动 → 看到真实进度 → 取消"；
-  `pnpm test` 全绿；core diff 仅 `src/schemas/` 纯新增与 `cli.ts` 子命令。
+- [x] `src/schemas/`：`grabTaskInputSchema` / `deviceConnectSchema` / `deviceDisconnectSchema`（zod，字段语义与 server.ts `damai_grab`/`connect_device` 对齐；不含 confirmOrder/maxGrabAttempts 等 web 流程未使用参数）
+- [x] 设备页：RSC 快照 `DeviceManager.listDevices()` + Server Action `connectDevice`/`disconnectDevice`（next-safe-action）
+- [x] 任务页：Server Action `startGrabTask`/`cancelTask` → TaskManager（runner 包装 `runChecklist`，登记 stopEvent/progressCb/onPhase）；RHF + zodResolver 表单；任务列表 TanStack Table（**钉在 v8.21.3**，v9 为 2026 新大版本 API 不兼容）；1.5s TanStack Query 轮询 + SSE 实时进度
+- [x] `app/api/tasks/[id]/events/route.ts`：SSE（backlog 按 progressTotal 序号补发 → 实时 progress → 终态 status 关流，15s 心跳，abort 清理）
+- [x] 测试：core checklist stopEvent 穿线 2 例（预热前取消 / 候场中取消均不 fire）；web TaskManager 订阅/续传/result 2 例；SSE 路由 4 例（404 / backlog+终态关流 / 运行中实时+取消终态 / 事件帧协议）；TaskTable 组件冒烟 2 例（jsdom）
+- **验收结果**：`next build` 全路由编译（/、/devices、/tasks、/api/tasks、/api/tasks/[id]/events、/api/health、/api/token）；根 typecheck 干净；core 16 文件 **276 测试**全绿（+2）；web 3 文件 **18 测试**全绿；live 冒烟（production start 模式）：无 token 401、三个页面 200、`/api/tasks` JSON、SSE 未知任务 404、任务页含全部关键区块。
+- **浏览器端完整抢票流程（等开票→取消）需真机/模拟器**——任务生命周期、SSE 推流、取消收敛已由测试覆盖；本机无 adb，页面在无设备时优雅降级（空列表 + 引导文案）。
+- 实施备注：TanStack Table 钉 v8；`middleware.ts` 已按 Next 16 规范更名 `proxy.ts`（Phase 0 遗留项一并完成）。
+
+#### D9（对 D1 的记录在案偏离）：停止信号穿线 core
+
+Phase 0 的 TaskManager 取消只是"管理器层标记"——core 的 `runChecklist` 原本不接受外部
+stopEvent（内部候场传 null），用户点"取消"后底层等票流程仍会跑到 fireAt 并 fire（虽然
+confirmOrder=false 恒不提交，但设备仍被操作）。为让取消真实生效，对 `src/damai/checklist.ts`
+做了最小 additive 修改（约 15 行，默认 null = 行为逐字不变，既有 274 用例零改动全过）：
+
+1. `RunChecklistOptions` 新增 `stopEvent?: StopEvent | null`；
+2. 预热前 / Phase 3 后各加一次 stopEvent 检查（取消 → `status="cancelled"`、不进入 fire）；
+3. `countdownLoop` 与 `waitForSaleStart` 调用透传 stopEvent。
+
+已知边界：已进入 grab_fire（≤60s 硬停止窗口）的流程无法中断，取消后任务在本阶段边界收敛。
 
 ### Phase 2 — 监控、通知与复盘
 

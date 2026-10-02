@@ -802,6 +802,14 @@ export interface RunChecklistOptions {
   /** 每个倒计时 tick 触发的异步回调，参数为 (seconds_left, elapsed_s)。 */
   onProgress?: ProgressCallback | null;
   /**
+   * 外部停止信号（web 控制台的取消按钮，计划 D9）：置位后，尚未开始的阶段
+   * 被跳过，候场（countdownLoop / waitForSaleStart）在下一个检查点提前返回，
+   * Phase 4 fire 不再执行，runChecklist 以 status="cancelled" 收敛。
+   * 已进入 grab_fire 的流程无法中断（grabOptions 的 60s 硬停止兜底）。
+   * 缺省 null = 行为与未传时逐字一致，既有调用方零影响。
+   */
+  stopEvent?: StopEvent | null;
+  /**
    * 是否禁用开票判定去抖门；true 时 Phase 3 回退为纯 {@link countdownLoop}
    * 候场（旧行为），且 Phase 4 仍把 openTime 透传给 {@link damaiGrab}。
    * 已知限制：该逃生路径下 open_time 的 NTP offset 修正会被 damaiGrab 内部
@@ -810,7 +818,8 @@ export interface RunChecklistOptions {
   signalGateDisabled?: boolean;
   /**
    * 透传给 {@link waitForSaleStart} 的门参数；observeFromUnix / progressCb /
-   * stopEvent 由 checklist 自己决定（observeFromUnix 恒为 fireAt），不接受覆盖。
+   * stopEvent 由 checklist 统一注入（observeFromUnix 恒为 fireAt，progressCb
+   * 透传 onProgress，stopEvent 来自本接口），不接受覆盖。
    */
   signalGateOptions?: Omit<
     WaitForSaleStartOptions,
@@ -837,6 +846,7 @@ export async function runChecklist(
     ntpTimeoutSec = 5.0,
     onPhase = null,
     onProgress = null,
+    stopEvent = null,
     signalGateDisabled = false,
     signalGateOptions = null,
   }: RunChecklistOptions = {},
@@ -925,6 +935,13 @@ export async function runChecklist(
   };
 
   if (targetUnix !== null && preheatSeconds > 0) {
+    // ---- 外部停止检查（web 取消）：预热/候场开始前先看 stopEvent ----
+    if (stopEvent !== null && stopEvent.isSet()) {
+      result.status = "cancelled";
+      result.error = "cancelled_by_user: 用户在候场前取消";
+      return result;
+    }
+
     // ---- Phase 2: 详情页预热 ----
     // 提前打开详情页，让购买按钮已进缓存
     const p2 = begin("preheat_open", `preheat_seconds=${formatPyFloat(preheatSeconds)}`);
@@ -967,7 +984,7 @@ export async function runChecklist(
       // 逃生通道：禁用去抖门时保持旧行为（纯候场到 fireAt；Phase 4 仍透传
       // openTime，damaiGrab 自带的开票时间闸门生效。已知限制：该模式下
       // targetUnix 的 NTP 修正会被 damaiGrab 内部按未修正墙钟重睡抵消）
-      await countdownLoop(fireAt, { progressCb: onProgress });
+      await countdownLoop(fireAt, { progressCb: onProgress, stopEvent });
     } else {
       // 开票判定去抖门：候场段复用 countdownLoop（observeFromUnix=fireAt，
       // 行为逐字不变），到点前后用「连续 N 次节点消失 + 定时器兜底」判定开票。
@@ -975,6 +992,7 @@ export async function runChecklist(
         ...signalGateOptions,
         observeFromUnix: fireAt,
         progressCb: onProgress,
+        stopEvent,
       });
       result.saleTrigger = waitRes.trigger;
       grabOpenTime = ""; // checklist 已判「到点」，Phase 4 立即模式
@@ -984,6 +1002,13 @@ export async function runChecklist(
       );
     }
     end(p3);
+
+    // ---- 外部停止检查：候场被取消 → 不进入 fire（提交动作绝不因取消误触）----
+    if (stopEvent !== null && stopEvent.isSet()) {
+      result.status = "cancelled";
+      result.error = "cancelled_by_user: 用户在候场阶段取消，未进入抢票";
+      return result;
+    }
 
     // ---- Phase 4: fire ----
     const p4 = begin("grab_fire");

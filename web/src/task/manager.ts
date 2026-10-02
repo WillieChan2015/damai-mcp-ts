@@ -69,9 +69,16 @@ export interface TaskSnapshot {
   error: string | null;
   /** 进度/日志行（环形缓冲，最新在尾部）。 */
   progress: readonly string[];
+  /** 全局进度总行数（含已被环形缓冲丢弃的行）；SSE 断线续传用。 */
+  progressTotal: number;
+  /** 任务执行体的返回值（如 runChecklist 的 toDict()）；未结束为 null。 */
+  result: unknown;
 }
 
 const PROGRESS_CAP = 500;
+
+/** 进度订阅回调：line 为日志行，index 为其全局序号（0-based，单调递增）。 */
+export type ProgressSubscriber = (line: string, index: number) => void;
 
 interface TaskEntry {
   id: string;
@@ -85,6 +92,9 @@ interface TaskEntry {
   unresponsive: boolean;
   error: string | null;
   progress: string[];
+  progressTotal: number;
+  subscribers: Set<ProgressSubscriber>;
+  result: unknown;
   cancelTimer: ReturnType<typeof setTimeout> | null;
   settleWaiters: Array<() => void>;
 }
@@ -119,6 +129,9 @@ export class TaskManager {
       unresponsive: false,
       error: null,
       progress: [],
+      progressTotal: 0,
+      subscribers: new Set(),
+      result: null,
       cancelTimer: null,
       settleWaiters: [],
     };
@@ -179,13 +192,43 @@ export class TaskManager {
     });
   }
 
+  /**
+   * 订阅任务进度（SSE 路由用）。
+   *
+   * 先同步回放缓冲区内 index ≥ fromIndexExclusive 的行（补发断线期间的
+   * backlog），再转入实时推送；返回退订函数。任务不存在时抛错。
+   */
+  subscribe(taskId: string, fromIndexExclusive: number, onLine: ProgressSubscriber): () => void {
+    const entry = this.tasks.get(taskId);
+    if (!entry) {
+      throw new Error(`任务不存在: ${taskId}`);
+    }
+    const from = Math.max(0, Math.trunc(fromIndexExclusive));
+    const offset = entry.progressTotal - entry.progress.length;
+    for (let i = from; i < entry.progressTotal; i++) {
+      onLine(entry.progress[i - offset]!, i);
+    }
+    const subscriber: ProgressSubscriber = (line, index) => {
+      if (index >= from) {
+        onLine(line, index);
+      }
+    };
+    entry.subscribers.add(subscriber);
+    return () => {
+      entry.subscribers.delete(subscriber);
+    };
+  }
+
   private async run(entry: TaskEntry, runner: TaskRunner): Promise<void> {
     try {
-      await runner({
+      const value = await runner({
         taskId: entry.id,
         stopEvent: entry.stopEvent,
         onProgress: (line) => this.pushProgress(entry, line),
       });
+      if (value !== undefined) {
+        entry.result = value;
+      }
       entry.status = entry.stopEvent.isSet() ? "cancelled" : "succeeded";
     } catch (exc) {
       entry.error = exc instanceof Error ? exc.message : String(exc);
@@ -210,8 +253,17 @@ export class TaskManager {
 
   private pushProgress(entry: TaskEntry, line: string): void {
     entry.progress.push(line);
+    entry.progressTotal += 1;
     if (entry.progress.length > PROGRESS_CAP) {
       entry.progress.splice(0, entry.progress.length - PROGRESS_CAP);
+    }
+    const index = entry.progressTotal - 1;
+    for (const subscriber of [...entry.subscribers]) {
+      try {
+        subscriber(line, index);
+      } catch {
+        // 订阅者（SSE 流）出错不拖垮任务本身
+      }
     }
   }
 
@@ -227,6 +279,8 @@ export class TaskManager {
       unresponsive: entry.unresponsive,
       error: entry.error,
       progress: [...entry.progress],
+      progressTotal: entry.progressTotal,
+      result: entry.result,
     };
   }
 }
