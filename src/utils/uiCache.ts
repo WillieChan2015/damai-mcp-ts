@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import { adb } from "../device/adb";
 import { dumpUi } from "../inspector/dump";
 import type { UIElement } from "../inspector/models";
+import { logger } from "./logging";
 import { searchElements } from "./findHelpers";
 
 /** 默认 TTL（秒）。 */
@@ -116,10 +117,16 @@ export class UICache {
         const h = await this.fingerprint(deviceId);
         if (h !== null && h === this.screenHash) {
           this.hits += 1;
+          logger.debug(
+            `UI 缓存命中: device=${deviceId} 省略 1 次 dump（累计命中 ${this.hits}，未命中 ${this.misses}）`,
+          );
           return this.elements;
         }
       }
       this.misses += 1;
+      logger.debug(
+        `UI 缓存未命中: device=${deviceId} 重新 dump（累计命中 ${this.hits}，未命中 ${this.misses}）`,
+      );
       this.elements = await dumpUi(deviceId);
       this.screenHash = await this.fingerprint(deviceId);
       this.fetchedAt = performance.now();
@@ -140,4 +147,46 @@ export class UICache {
     const elements = await this.get(deviceId);
     return searchElements(elements, { text, resourceId, xpath: xpathExpr, exact });
   }
+}
+
+// ---------------------------------------------------------------------------
+// per-device 注册表：抢票热路径（checklist / damaiGrab）显式启用；未注册时
+// inspector/find 的 find* 保持裸 dumpUi 的旧行为（机制零参与，逐字一致）。
+// 已知盲区：截屏头部指纹对「顶部像素不变、底部弹层出现」可能误判未变——
+// 因此写路径（tap/swipe 等）每次成功后必须 invalidateDeviceUiCache；TTL 上限
+// 1s 限陈旧度；价格读取（damaiSelectPrice）直调 dumpUi 永不缓存。
+// ---------------------------------------------------------------------------
+
+/** deviceId → UICache 实例。 */
+const deviceUiCaches = new Map<string, UICache>();
+
+/** 取设备的 UI 缓存实例；未注册时返回 null（调用方回落裸 dumpUi）。 */
+export function getDeviceUiCache(deviceId: string): UICache | null {
+  return deviceUiCaches.get(deviceId) ?? null;
+}
+
+/**
+ * 为设备启用 UI 缓存并返回实例；重复启用返回既有实例（TTL 不变）。
+ *
+ * @param ttlSec 缓存 TTL（秒）。默认 {@link DEFAULT_TTL_SEC}；抢票热循环可
+ *   传 0.5 之类更小的值限陈旧度。
+ */
+export function enableDeviceUiCache(deviceId: string, ttlSec: number = DEFAULT_TTL_SEC): UICache {
+  const existing = deviceUiCaches.get(deviceId);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const cache = new UICache(ttlSec);
+  deviceUiCaches.set(deviceId, cache);
+  return cache;
+}
+
+/** 停用并丢弃设备的 UI 缓存；未注册时为 no-op。 */
+export function disableDeviceUiCache(deviceId: string): void {
+  deviceUiCaches.delete(deviceId);
+}
+
+/** 强制设备的下一次读取重新 dump；未注册时为 no-op。写路径成功后必须调用。 */
+export function invalidateDeviceUiCache(deviceId: string): void {
+  deviceUiCaches.get(deviceId)?.invalidate();
 }

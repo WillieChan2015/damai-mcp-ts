@@ -39,6 +39,7 @@ import {
 import { runChecklist } from "./damai/checklist";
 import { monitorAvailability } from "./damai/monitor";
 import { whichAdb } from "./device/adb";
+import { withDeviceLease } from "./device/lock";
 import { LDPlayerInstance, launchInstance, whichLdconsole } from "./device/ldplayer";
 import { DeviceManager } from "./device/manager";
 import { dumpUi, dumpUiToFile } from "./inspector/dump";
@@ -51,7 +52,7 @@ import {
 } from "./inspector/find";
 import { CLAWBOT_DEFAULT_TIMEOUT_MS, ClawBotClient } from "./notify/wechat";
 import { configure as configureLogging, logger } from "./utils/logging";
-import { DEFAULT_NTP_SERVER, asyncQuery, fetchDeviceTime } from "./utils/ntp";
+import { DEFAULT_NTP_SERVER, fetchDeviceTime, querySampled } from "./utils/ntp";
 
 // Python `server.py` 底部以 noqa: F401 再导出的公共面，此处保持一致。
 export { DamaiSelectors, GrabConfig } from "./damai/selectors";
@@ -697,9 +698,19 @@ export function createMcpServer(): McpServer {
         "    ticket_num: 张数。\n" +
         '    open_time: 开票时间 "YYYY-MM-DD HH:MM:SS"（空=立即抢）。\n' +
         "    preheat_seconds: 开票前多少秒开始预热（默认 30）。\n" +
-        "    max_runtime_sec: 整个流程最大耗时（默认 600 秒）。\n\n" +
+        "    max_runtime_sec: 整个流程最大耗时（默认 600 秒；现为硬停止——\n" +
+        "        预热/开票等待与重试循环超限即中止并报「已达最大运行时长」）。\n" +
+        "    max_grab_attempts: 可重试失败（购买按钮未出现/价格表未弹出/选观演人\n" +
+        "        超时）的最大尝试轮数，含首轮（默认 1=不重试；指数退避重试需显式开启）。\n" +
+        "    retry_interval_ms: 重试退避基数毫秒（默认 500，按 2^n 指数递增封顶 10s）。\n\n" +
+        "同一设备同时只允许一个监控/抢票任务（设备被占用时立即报错）。\n\n" +
         "注意：提交结果可能出现 status=needs_action：表示订单请求结果未确认，\n" +
-        "请先打开 https://orders.damai.cn/orderList 人工核对，切勿直接重跑。",
+        "请先打开 https://orders.damai.cn/orderList 人工核对，切勿直接重跑。\n" +
+        "还可能出现 status=needs_human_captcha：区别于 failed——页面被滑块验证\n" +
+        "风控拦截但订单未提交，请人工完成验证后再重跑；本流程绝不自动过滑块。\n" +
+        "submitted 结果含 order_seen 字段：true=已见订单/收银页证据；false=提交\n" +
+        "点击已送达但未捕获到页面证据，请以官方订单页为准" +
+        "（https://orders.damai.cn/orderList）。",
       inputSchema: {
         device_id: z.string(),
         item_id: z.string(),
@@ -709,6 +720,9 @@ export function createMcpServer(): McpServer {
         open_time: z.string().default(""),
         preheat_seconds: z.number().default(30.0),
         max_runtime_sec: z.number().default(600.0),
+        // 重试泵默认关闭（保守）：默认行为与历史版本一致，重试由调用方显式开启
+        max_grab_attempts: z.number().int().min(1).max(20).default(1),
+        retry_interval_ms: z.number().int().min(100).max(60000).default(500),
         // 与 Python 签名一致：confirm_order 默认 false，永不自动点击支付
         confirm_order: z.boolean().default(false),
       },
@@ -723,20 +737,27 @@ export function createMcpServer(): McpServer {
       open_time,
       preheat_seconds,
       max_runtime_sec,
+      max_grab_attempts,
+      retry_interval_ms,
       confirm_order,
     }) => {
-      const grab = await damaiGrab(
-        device_id,
-        item_id,
-        price_index,
-        viewer_names ?? [],
-        ticket_num,
-        open_time,
-        {
-          preheatSeconds: preheat_seconds,
-          maxRuntimeSec: max_runtime_sec,
-          confirmOrder: confirm_order,
-        },
+      // 设备占用互斥：与监控/其他抢票任务在同一设备上互斥（进程内）
+      const grab = await withDeviceLease(device_id, "grab", () =>
+        damaiGrab(
+          device_id,
+          item_id,
+          price_index,
+          viewer_names ?? [],
+          ticket_num,
+          open_time,
+          {
+            preheatSeconds: preheat_seconds,
+            maxRuntimeSec: max_runtime_sec,
+            maxGrabAttempts: max_grab_attempts,
+            retryIntervalMs: retry_interval_ms,
+            confirmOrder: confirm_order,
+          },
+        ),
       );
       return dictResult(grab);
     },
@@ -748,11 +769,15 @@ export function createMcpServer(): McpServer {
       description:
         "多账号/多设备并发抢票（asyncio.gather）。\n\n" +
         "Args:\n" +
-        '    accounts: [{"device_id": "127.0.0.1:5555", "viewer_names": ["A"]}, ...]。\n' +
+        '    accounts: [{"device_id": "127.0.0.1:5555", "viewer_names": ["A"],\n' +
+        '        "max_grab_attempts": 3}, ...]（account 内可选键 max_grab_attempts\n' +
+        "        = 该账号的可重试失败最大尝试轮数，默认 1=不重试）。\n" +
         "    item_id: 大麦 item id。\n" +
         "    price_index: 票档序号。\n" +
         "    open_time: 开票时间。\n" +
-        "    preheat_seconds: 预热秒数。",
+        "    preheat_seconds: 预热秒数。\n\n" +
+        "同一设备同时只允许一个监控/抢票任务：accounts 中重复的 device_id\n" +
+        "会得到明确的占用错误而非互相踩踏。",
       inputSchema: {
         accounts: z.array(z.record(z.unknown())),
         item_id: z.string(),
@@ -769,14 +794,27 @@ export function createMcpServer(): McpServer {
         if (!("device_id" in a)) {
           throw new Error("'device_id'");
         }
-        return damaiGrab(
+        // 按每账号 device_id 各自占用：重复 device_id 的第二个账号得到明确的
+        // DeviceBusyError（进 allSettled 的 error 结果），而非互相踩踏
+        // max_grab_attempts 为可选键：非法值（非正整数）一律回退 1（不重试）
+        const rawAttempts: unknown = a["max_grab_attempts"];
+        const maxGrabAttempts =
+          typeof rawAttempts === "number" && Number.isInteger(rawAttempts) && rawAttempts >= 1
+            ? rawAttempts
+            : 1;
+        return withDeviceLease(
           a["device_id"] as string,
-          item_id,
-          price_index,
-          (a["viewer_names"] ?? []) as string[],
-          (a["ticket_num"] ?? 1) as number,
-          open_time,
-          { preheatSeconds: preheat_seconds },
+          "grab_multi",
+          () =>
+            damaiGrab(
+              a["device_id"] as string,
+              item_id,
+              price_index,
+              (a["viewer_names"] ?? []) as string[],
+              (a["ticket_num"] ?? 1) as number,
+              open_time,
+              { preheatSeconds: preheat_seconds, maxGrabAttempts },
+            ),
         );
       });
       // gather(return_exceptions=True) 的结构等价物：allSettled 保序收集
@@ -811,13 +849,27 @@ export function createMcpServer(): McpServer {
       outputSchema: DICT_OUTPUT,
     },
     async ({ server, timeout_sec, device_id }) => {
-      const result = await asyncQuery(server, timeout_sec);
-      const payload: Record<string, unknown> = { ...result.toDict() };
+      // 多次采样（默认 3 次取最小 RTT）：旧键全部保留（向后兼容），
+      // 另增 round_trip_ms / uncertainty_ms / interval_* / samples / sampled_at_unix。
+      const result = await querySampled(server, timeout_sec);
+      // 旧键语义：delay_ms = 最小 RTT（仍为「往返时延」）；server_unix 在缺失时
+      // 以本机钟 + offset 兜底（有效样本下即服务器 Transmit Timestamp）
+      const serverUnix = result.serverUnix ?? Date.now() / 1000 + result.offsetMs / 1000;
+      const payload: Record<string, unknown> = {
+        ...result.toDict(),
+        // 旧键保留（向后兼容，值与采样语义一致；置于 spread 之后保证旧键名不丢）
+        server: result.server,
+        offset_ms: round2(result.offsetMs),
+        delay_ms: round2(result.roundTripMs),
+        server_unix: serverUnix,
+        queried_at_unix: result.sampledAtUnix,
+        synced: result.synced,
+      };
       if (device_id !== null) {
         const deviceUnix = await fetchDeviceTime(device_id);
         payload["device_unix"] = deviceUnix;
         if (deviceUnix !== null) {
-          payload["device_offset_ms"] = round2((result.serverUnix - deviceUnix) * 1000);
+          payload["device_offset_ms"] = round2((serverUnix - deviceUnix) * 1000);
         }
       }
       return dictResult(payload);
@@ -839,7 +891,8 @@ export function createMcpServer(): McpServer {
         "    viewer_names: 观演人姓名列表。\n" +
         "    ticket_num: 张数。\n" +
         "    preheat_seconds: 开票前多少秒开始预热（默认 30）。\n" +
-        "    ntp_server: NTP 服务器（默认 pool.ntp.org；国内用 cn.pool.ntp.org）。",
+        "    ntp_server: NTP 服务器（默认 pool.ntp.org；国内用 cn.pool.ntp.org）。\n\n" +
+        "同一设备同时只允许一个监控/抢票任务（设备被占用时立即报错）。",
       inputSchema: {
         device_id: z.string(),
         item_id: z.string(),
@@ -875,16 +928,18 @@ export function createMcpServer(): McpServer {
         }
       };
 
-      const res = await runChecklist(device_id, item_id, {
-        openTime: open_time,
-        priceIndex: price_index,
-        viewerNames: viewer_names ?? [],
-        ticketNum: ticket_num,
-        preheatSeconds: preheat_seconds,
-        ntpServer: ntp_server,
-        onPhase: phaseCb,
-        onProgress: progressCb,
-      });
+      const res = await withDeviceLease(device_id, "checklist_grab", () =>
+        runChecklist(device_id, item_id, {
+          openTime: open_time,
+          priceIndex: price_index,
+          viewerNames: viewer_names ?? [],
+          ticketNum: ticket_num,
+          preheatSeconds: preheat_seconds,
+          ntpServer: ntp_server,
+          onPhase: phaseCb,
+          onProgress: progressCb,
+        }),
+      );
       return dictResult(res.toDict());
     },
   );
@@ -907,7 +962,8 @@ export function createMcpServer(): McpServer {
         "    max_attempts: 最大尝试次数（0=无限；工具层默认 720，避免调用方忘记终止）。\n" +
         "    max_consecutive_errors: dump 连续失败多少次后停止（默认 5）。\n" +
         "    open_page: 开始时是否深链打开详情页（默认 true；属导航非点击，只执行一次）。\n" +
-        "    deadline_unix_ms: 墙钟截止（Unix 毫秒），到达即停 timeout；null=不设截止。",
+        "    deadline_unix_ms: 墙钟截止（Unix 毫秒），到达即停 timeout；null=不设截止。\n\n" +
+        "同一设备同时只允许一个监控/抢票任务（设备被占用时立即报错）。",
       inputSchema: {
         device_id: z.string(),
         item_id: z.string(),
@@ -929,21 +985,25 @@ export function createMcpServer(): McpServer {
       open_page,
       deadline_unix_ms,
     }) => {
-      const result = await monitorAvailability(device_id, item_id, {
-        intervalMs: interval_ms,
-        maxAttempts: max_attempts,
-        maxConsecutiveErrors: max_consecutive_errors,
-        openPage: open_page,
-        deadlineUnixMs: deadline_unix_ms,
-        onReport: (snapshot) => {
-          const reasonText = snapshot.reason === null ? "" : `（${snapshot.reason}）`;
-          const nextText =
-            snapshot.nextDelayMs === null ? "" : `，${Math.round(snapshot.nextDelayMs / 1000)}s 后继续`;
-          logger.info(
-            `[monitor] 第 ${snapshot.attempt} 次采样: ${snapshot.status}${reasonText}${nextText}`,
-          );
-        },
-      });
+      // 设备占用互斥：openPage=true 的深链导航会干扰抢票流程的页面状态，
+      // 与抢票工具在同一设备上互斥（进程内）；只读约束不变（零写入指令）
+      const result = await withDeviceLease(device_id, "monitor", () =>
+        monitorAvailability(device_id, item_id, {
+          intervalMs: interval_ms,
+          maxAttempts: max_attempts,
+          maxConsecutiveErrors: max_consecutive_errors,
+          openPage: open_page,
+          deadlineUnixMs: deadline_unix_ms,
+          onReport: (snapshot) => {
+            const reasonText = snapshot.reason === null ? "" : `（${snapshot.reason}）`;
+            const nextText =
+              snapshot.nextDelayMs === null ? "" : `，${Math.round(snapshot.nextDelayMs / 1000)}s 后继续`;
+            logger.info(
+              `[monitor] 第 ${snapshot.attempt} 次采样: ${snapshot.status}${reasonText}${nextText}`,
+            );
+          },
+        }),
+      );
       return dictResult(result.toDict());
     },
   );

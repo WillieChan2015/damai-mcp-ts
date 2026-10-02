@@ -11,8 +11,14 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import { Jimp } from "jimp";
 
-import { adb, shell } from "../device/adb";
+import {
+  adb,
+  persistentShellEnabledFor,
+  runShellCommand,
+  shell,
+} from "../device/adb";
 import { ADBError } from "../utils/errors";
+import { invalidateDeviceUiCache } from "../utils/uiCache";
 import { retry, type RetryableErrorClass } from "../utils/retry";
 
 /** {@link pressKey} 接受的具名按键（取值保持 Android 键名原样）。 */
@@ -53,27 +59,111 @@ const KEYCODE: Record<string, number | undefined> = {
   right: 22,
 };
 
+// ---- 行为随机化原语（易容性可选层；默认关闭） ---------------------------------
+//
+// deviation（对 Python 原版的行为偏离）：Python 原版点击坐标恒为元素几何中心、
+// 步骤间等待恒为固定值。本节提供可注入随机源的抖动原语，供抢票热路径按需
+// 启用；不启用（不传参）时命令字符串与旧行为逐字节一致，便于测试复现。
+
+/** 随机源形态：返回 [0, 1) 的伪随机数（默认 Math.random）。 */
+export type JitterRng = () => number;
+
+/** 全局随机源；测试可注入固定序列（{@link setJitterRngForTests}）。 */
+let jitterRng: JitterRng = Math.random;
+
+/**
+ * 注入确定性随机源（测试复现用）；传 null 恢复默认 Math.random。
+ */
+export function setJitterRngForTests(rng: JitterRng | null): void {
+  jitterRng = rng ?? Math.random;
+}
+
+/**
+ * 在 `center ± radius` 内均匀取整抖动，结果 clamp 到 ≥ 0。
+ *
+ * @param rng 随机源；缺省用全局随机源。rng()=0 → center-radius，
+ *   rng()=0.5 → center，rng()→1 → center+radius。
+ */
+export function jitterInt(center: number, radius: number, rng: JitterRng = jitterRng): number {
+  const raw = center - radius + rng() * radius * 2;
+  return Math.max(0, Math.round(raw));
+}
+
+/**
+ * 把固定等待 `ms` 抖动 ±`ratio`（如 ratio=0.2 → [800, 1200]），四舍五入取整，
+ * 结果 clamp 到 ≥ 0。
+ */
+export function jitteredDelayMs(ms: number, ratio: number, rng: JitterRng = jitterRng): number {
+  const raw = ms * (1 - ratio + rng() * ratio * 2);
+  return Math.max(0, Math.round(raw));
+}
+
 // ---- tap / press ------------------------------------------------------------
 
 /**
+ * 派发一条 `input ...` 命令：per-device 持久 shell 启用时走常驻会话（省去
+ * 每次 spawn adb 客户端进程的冷启动；回执上限默认 4s，由
+ * enablePersistentShellForDevice 的 receiptTimeoutMs 配置控制），任一通道
+ * 失败回落一次性 `shell()` 重试一次——仍失败时沿用一次性路径的原语义中文
+ * 错误；未启用时与旧行为逐字一致。成功后使 per-device UI 缓存失效（未注册
+ * 时 no-op）。
+ */
+async function dispatchInputCommand(cmd: string, deviceId: string): Promise<void> {
+  if (!persistentShellEnabledFor(deviceId)) {
+    await shell(cmd, { deviceId, check: true });
+    invalidateDeviceUiCache(deviceId);
+    return;
+  }
+  try {
+    await runShellCommand(cmd, { deviceId });
+  } catch {
+    // 持久通道失败（回执超时 / 会话关闭 / 远端报错启发）→ 回落一次性 spawn 重试一次
+    await shell(cmd, { deviceId, check: true });
+  }
+  invalidateDeviceUiCache(deviceId);
+}
+
+/**
  * 在 (x, y) 处点按。`durationMs > 0` 模拟偏长按的点按。
+ *
+ * @param options.durationMs 按压时长（毫秒）；非 50 时以 `input swipe x y x y ms`
+ *   控制按压时长。
+ * @param options.jitterPx 点击点抖动半径（像素）；默认 0 → 坐标与命令字符串
+ *   与旧行为逐字节一致。> 0 时对 x/y 各做 {@link jitterInt}，且另有约 20%
+ *   概率把默认 50ms 按压时长变为 60-120ms（易容性，见随机化原语一节的
+ *   deviation 说明）。
+ *
+ * @remarks 持久 shell 复用启用时经常驻会话派发（fire 语义、不回读设备状态），
+ *   任一失败回落一次性 spawn 重试一次。
  */
 export async function tap(
   deviceId: string,
   x: number,
   y: number,
-  { durationMs = 50 }: { durationMs?: number } = {},
+  { durationMs = 50, jitterPx = 0 }: { durationMs?: number; jitterPx?: number } = {},
 ): Promise<void> {
-  let cmd = `input tap ${x} ${y}`;
-  if (durationMs && durationMs !== 50) {
-    // `input swipe x y x y ms` 是控制按压时长的标准做法
-    cmd = `input swipe ${x} ${y} ${x} ${y} ${durationMs}`;
+  let tx = x;
+  let ty = y;
+  let pressMs = durationMs;
+  if (jitterPx > 0) {
+    tx = jitterInt(x, jitterPx);
+    ty = jitterInt(y, jitterPx);
+    if (durationMs === 50 && jitterRng() < 0.2) {
+      pressMs = 60 + Math.round(jitterRng() * 60);
+    }
   }
-  await shell(cmd, { deviceId, check: true });
+  let cmd = `input tap ${tx} ${ty}`;
+  if (pressMs && pressMs !== 50) {
+    // `input swipe x y x y ms` 是控制按压时长的标准做法
+    cmd = `input swipe ${tx} ${ty} ${tx} ${ty} ${pressMs}`;
+  }
+  await dispatchInputCommand(cmd, deviceId);
 }
 
 /**
  * 在 (x, y) 处双击：两次 tap 之间隔 `gapMs`（默认 80ms）。
+ *
+ * @remarks 复用 {@link tap}——持久 shell 启用时两击均经常驻会话派发。
  */
 export async function doubleTap(
   deviceId: string,
@@ -88,6 +178,8 @@ export async function doubleTap(
 
 /**
  * 在 (x, y) 处长按 `durationMs`。上下文菜单建议用 500-1000ms。
+ *
+ * @remarks 持久 shell 复用启用时经常驻会话派发（同 {@link tap} 的回落策略）。
  */
 export async function longPress(
   deviceId: string,
@@ -95,16 +187,16 @@ export async function longPress(
   y: number,
   { durationMs = 800 }: { durationMs?: number } = {},
 ): Promise<void> {
-  await shell(`input swipe ${x} ${y} ${x} ${y} ${durationMs}`, {
-    deviceId,
-    check: true,
-  });
+  await dispatchInputCommand(`input swipe ${x} ${y} ${x} ${y} ${durationMs}`, deviceId);
 }
 
 // ---- swipe / scroll ---------------------------------------------------------
 
 /**
  * 在 `durationMs` 内从 (x1, y1) 拖动到 (x2, y2)。
+ *
+ * @remarks 持久 shell 复用启用时经常驻会话派发（同 {@link tap} 的回落策略）；
+ *   不做坐标抖动——刷新类手势是否抖动由调用方决定。
  */
 export async function swipe(
   deviceId: string,
@@ -114,10 +206,7 @@ export async function swipe(
   y2: number,
   { durationMs = 300 }: { durationMs?: number } = {},
 ): Promise<void> {
-  await shell(`input swipe ${x1} ${y1} ${x2} ${y2} ${durationMs}`, {
-    deviceId,
-    check: true,
-  });
+  await dispatchInputCommand(`input swipe ${x1} ${y1} ${x2} ${y2} ${durationMs}`, deviceId);
 }
 
 /**
@@ -125,6 +214,10 @@ export async function swipe(
  *
  * `up` 表示内容上移（手指从下往上），露出下方内容——与多数应用中
  * 用户意图一致。
+ *
+ * @remarks 本体未接持久 shell（先 `wm size` 探测分辨率，保持一次性语义）；
+ *   内部落到的 {@link swipe} 在持久 shell 启用时经常驻会话派发并使 UI 缓存
+ *   失效。
  */
 export async function scroll(
   deviceId: string,
@@ -161,6 +254,9 @@ export async function scroll(
  *
  * 中文（CJK）文本需要支持广播的输入法，例如 ADBKeyBoard。
  * 较短的 ASCII 文本则回退为逐字符 `input text`（`delayMs` 时逐字发送）。
+ *
+ * @remarks 本期不接持久 shell（逐字符发送的失败语义需保留一次性 check）；
+ *   成功后使 per-device UI 缓存失效（未注册时 no-op）。
  */
 export async function inputText(
   deviceId: string,
@@ -181,10 +277,14 @@ export async function inputText(
   } else {
     await shell(`input text ${safe}`, { deviceId, check: true });
   }
+  invalidateDeviceUiCache(deviceId);
 }
 
 /**
  * 按具名按键（如 "back"、"home"）或数字 keyevent 码。
+ *
+ * @remarks 本期不接持久 shell（back/home 等会整屏切换，失败语义需保留一次性
+ *   check）；成功后使 per-device UI 缓存失效（未注册时 no-op）。
  */
 export async function pressKey(
   deviceId: string,
@@ -201,6 +301,7 @@ export async function pressKey(
     code = Math.trunc(key); // 对应 Python `int(key)`
   }
   await shell(`input keyevent ${code}`, { deviceId, check: true });
+  invalidateDeviceUiCache(deviceId);
 }
 
 // ---- screenshot -------------------------------------------------------------

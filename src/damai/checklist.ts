@@ -22,9 +22,10 @@ import { DeviceManager } from "../device/manager";
 import { dumpUi } from "../inspector/dump";
 import type { UIElement } from "../inspector/models";
 import { logger } from "../utils/logging";
-import { asyncQuery } from "../utils/ntp";
+import { NTP_SAMPLES, querySampled } from "../utils/ntp";
 
 // 与 Python 版一致：在模块顶层导入，测试经模块 mock（vi.mock）替换。
+import type { DamaiGrabOptions } from "./actions";
 import { damaiGrab, damaiLoginCheck, damaiOpenConcert, parseIso } from "./actions";
 
 /** 等待 open_time 期间状态 ping 的间隔（秒）。 */
@@ -42,13 +43,19 @@ export type PhaseEventDict = {
   note: string;
 };
 
-/** {@link ChecklistResult.toDict} 的输出形态（键名与 Python 版一致）。 */
+/** {@link ChecklistResult.toDict} 的输出形态（键名与 Python 版一致；TS 侧新增键为增量，不改旧键）。 */
 export type ChecklistResultDict = {
   status: string;
   phases: PhaseEventDict[];
   grab_result: Record<string, unknown> | null;
   error: string | null;
   ntp_offset_ms: number | null;
+  /** NTP 误差半宽（毫秒）= 最小 RTT / 2 + 分辨率；NTP 失败为 null。 */
+  ntp_uncertainty_ms: number | null;
+  /** NTP 有效采样数；NTP 失败为 null。 */
+  ntp_samples: number | null;
+  /** 开票判定方式（去抖门启用且有 open_time 时）："gate" | "timer"；其余为 null。 */
+  sale_trigger: string | null;
 };
 
 /** {@link PhaseEvent} 的构造参数（对应 Python dataclass 字段及默认值）。 */
@@ -121,6 +128,12 @@ export class ChecklistResult {
   error: string | null;
   /** 若使用了 NTP 同步模块，记录其 offset（毫秒）。 */
   ntpOffsetMs: number | null;
+  /** NTP 误差半宽（毫秒）= 最小 RTT / 2 + 分辨率；NTP 失败为 null。 */
+  ntpUncertaintyMs: number | null;
+  /** NTP 有效采样数；NTP 失败为 null。 */
+  ntpSamples: number | null;
+  /** 开票判定方式（去抖门启用且有 open_time 时）："gate" | "timer"；其余为 null。 */
+  saleTrigger: string | null;
 
   constructor(init: {
     status: string;
@@ -128,12 +141,18 @@ export class ChecklistResult {
     grabResult?: Record<string, unknown> | null;
     error?: string | null;
     ntpOffsetMs?: number | null;
+    ntpUncertaintyMs?: number | null;
+    ntpSamples?: number | null;
+    saleTrigger?: string | null;
   }) {
     this.status = init.status;
     this.phases = init.phases ?? [];
     this.grabResult = init.grabResult ?? null;
     this.error = init.error ?? null;
     this.ntpOffsetMs = init.ntpOffsetMs ?? null;
+    this.ntpUncertaintyMs = init.ntpUncertaintyMs ?? null;
+    this.ntpSamples = init.ntpSamples ?? null;
+    this.saleTrigger = init.saleTrigger ?? null;
   }
 
   /**
@@ -148,6 +167,9 @@ export class ChecklistResult {
       grab_result: this.grabResult,
       error: this.error,
       ntp_offset_ms: this.ntpOffsetMs,
+      ntp_uncertainty_ms: this.ntpUncertaintyMs,
+      ntp_samples: this.ntpSamples,
+      sale_trigger: this.saleTrigger,
     };
   }
 }
@@ -781,7 +803,9 @@ export interface RunChecklistOptions {
   onProgress?: ProgressCallback | null;
   /**
    * 是否禁用开票判定去抖门；true 时 Phase 3 回退为纯 {@link countdownLoop}
-   * 候场（旧行为）。默认 false。
+   * 候场（旧行为），且 Phase 4 仍把 openTime 透传给 {@link damaiGrab}。
+   * 已知限制：该逃生路径下 open_time 的 NTP offset 修正会被 damaiGrab 内部
+   * 按未修正墙钟重睡抵消。默认 false。
    */
   signalGateDisabled?: boolean;
   /**
@@ -834,13 +858,18 @@ export async function runChecklist(
     ev.finishedAtMs = nowMs();
   };
 
-  // ---- Phase -1: NTP 同步（尽力而为）----
+  // ---- Phase -1: NTP 同步（尽力而为；多次采样取最小 RTT）----
+  // timeout 语义 = 每个样本的超时；最坏时延 3 × ntpTimeoutSec（默认 15s），
+  // Phase -1 为尽力而为阶段，可接受。失败时回退为无修正继续（旧行为）。
   const pNtp = begin("ntp_sync", `server=${ntpServer}`);
   try {
-    const ntpRes = await asyncQuery(ntpServer, ntpTimeoutSec);
+    const ntpRes = await querySampled(ntpServer, ntpTimeoutSec);
     result.ntpOffsetMs = ntpRes.offsetMs;
+    result.ntpUncertaintyMs = ntpRes.uncertaintyMs;
+    result.ntpSamples = ntpRes.samples;
     logger.info(
-      `[checklist] NTP offset=${signed2(ntpRes.offsetMs)}ms delay=${ntpRes.delayMs.toFixed(2)}ms`,
+      `[checklist] NTP offset=${signed2(ntpRes.offsetMs)}ms delay=${ntpRes.roundTripMs.toFixed(2)}ms ` +
+        `uncertainty=${ntpRes.uncertaintyMs.toFixed(2)}ms samples=${ntpRes.samples}/${NTP_SAMPLES}`,
     );
   } catch (exc) {
     logger.warning(`[checklist] NTP sync failed (continuing without): ${excToStr(exc)}`);
@@ -848,7 +877,19 @@ export async function runChecklist(
   end(pNtp);
 
   const parsed = parseOpenTime(openTime);
-  const targetUnix = parsed !== null ? parsed.getTime() / 1000 : null;
+  // 开票时刻按 NTP offset 换算到本机时钟：服务器时刻到达 W 的瞬间，本机钟
+  // 读到 W − offsetMs/1000（offsetMs = server − local，正=服务器超前；公式
+  // 约定见 utils/ntp.ts 的单臂推导，等价 clock.rs 的 target − offset − local）。
+  // NTP 失败时 offset = 0，targetUnix 与未修正的旧行为逐字一致。
+  const ntpOffset = result.ntpOffsetMs ?? 0;
+  let targetUnix: number | null = null;
+  if (parsed !== null) {
+    targetUnix = parsed.getTime() / 1000 - ntpOffset / 1000;
+    logger.info(
+      `[checklist] 开票目标 target=${targetUnix.toFixed(3)}` +
+        `（target_corrected=${ntpOffset !== 0 ? "yes" : "no"}, offset=${signed2(ntpOffset)}ms）`,
+    );
+  }
 
   // ---- Phase 0: 连接检查 ----
   const p0 = begin("connectivity", `device=${deviceId}`);
@@ -875,6 +916,13 @@ export async function runChecklist(
     logger.warning(`[checklist] login_check raised: ${excToStr(exc)}`);
   }
   end(p1);
+
+  // grabOptions 显式标注 DamaiGrabOptions（类型收紧）：checklist 固定
+  // confirmOrder 缺省 false（不自动提交）、maxRuntimeSec=60s 为硬停止短窗口。
+  const grabOptions: DamaiGrabOptions = {
+    preheatSeconds: 0.0, // checklist 已预热
+    maxRuntimeSec: 60.0, // 短窗口 —— 已预热（超限硬停止，报「已达最大运行时长」）
+  };
 
   if (targetUnix !== null && preheatSeconds > 0) {
     // ---- Phase 2: 详情页预热 ----
@@ -908,19 +956,28 @@ export async function runChecklist(
     const fireAt = targetUnix - preheatSeconds;
     // Python 版在此捕获 asyncio.CancelledError 后补记 _end 再重抛；JS 侧的
     // sleep 未接 AbortSignal、正常路径不会中途抛出，故省略该分支。
+    // Phase 4 传给 damaiGrab 的 openTime：去抖门启用时 checklist 是唯一时间
+    // 权威——waitForSaleStart 的定时器兜底与门确认都基于 NTP 修正后的
+    // targetUnix，gate 触发 = 修正后的 T0 已到（含提前开售），timer 触发 =
+    // 本地钟已过修正后 T0 + fallbackAfterMs。此时 damaiGrab 若再按未修正的
+    // 墙钟 openTime 重睡到 parseIso(openTime)，会把 offset 修正与门的提前量
+    // 全部吞掉——因此 Phase 4 一律以立即模式（空串）触发。
+    let grabOpenTime = openTime;
     if (signalGateDisabled) {
-      // 逃生通道：禁用去抖门时保持旧行为（纯候场到 fireAt）
+      // 逃生通道：禁用去抖门时保持旧行为（纯候场到 fireAt；Phase 4 仍透传
+      // openTime，damaiGrab 自带的开票时间闸门生效。已知限制：该模式下
+      // targetUnix 的 NTP 修正会被 damaiGrab 内部按未修正墙钟重睡抵消）
       await countdownLoop(fireAt, { progressCb: onProgress });
     } else {
       // 开票判定去抖门：候场段复用 countdownLoop（observeFromUnix=fireAt，
       // 行为逐字不变），到点前后用「连续 N 次节点消失 + 定时器兜底」判定开票。
-      // Phase 4 仍透传 openTime——damaiGrab 自带的开票时间闸门不被绕过，
-      // 门提前确认时 waitUntil 立即返回，两层语义自动对齐。
       const waitRes = await waitForSaleStart(deviceId, targetUnix, {
         ...signalGateOptions,
         observeFromUnix: fireAt,
         progressCb: onProgress,
       });
+      result.saleTrigger = waitRes.trigger;
+      grabOpenTime = ""; // checklist 已判「到点」，Phase 4 立即模式
       logger.info(
         `[checklist] 开票判定: trigger=${waitRes.trigger} baseline=${waitRes.baselineEstablished} ` +
           `rearm=${waitRes.rearmCount} refreshes=${waitRes.refreshes} uiDisabled=${waitRes.uiDisabled}`,
@@ -937,11 +994,8 @@ export async function runChecklist(
         priceIndex,
         viewerNames ?? [],
         ticketNum,
-        openTime, // damai_grab 自带开票时间闸门
-        {
-          preheatSeconds: 0.0, // checklist 已预热
-          maxRuntimeSec: 60.0, // 短窗口 —— 已预热
-        },
+        grabOpenTime, // 门启用时为 ""（checklist 是唯一时间权威）；逃生通道透传原值
+        grabOptions,
       );
       result.grabResult = grab;
       result.status = grab.status ?? "submitted";
@@ -961,10 +1015,7 @@ export async function runChecklist(
         viewerNames ?? [],
         ticketNum,
         "",
-        {
-          preheatSeconds: 0.0,
-          maxRuntimeSec: 60.0,
-        },
+        grabOptions,
       );
       result.grabResult = grab;
       result.status = grab.status ?? "submitted";

@@ -34,3 +34,57 @@ export type {
   SendOutcome,
   SendStatus,
 } from "./notify/wechat";
+
+// 通知凭证本地持久化（src/notify/credentials.ts；0o600/0o700 + rename 原子替换）
+export {
+  NOTIFY_CREDENTIALS_DIR_DEFAULT,
+  NOTIFY_CREDENTIALS_FILE_DEFAULT,
+  clearNotifyCredentials,
+  loadNotifyCredentials,
+  redactToken,
+  saveNotifyCredentials,
+  setNotifyCredentialsDirForTests,
+} from "./notify/credentials";
+export type { NotifyCredentials } from "./notify/credentials";
+
+// 设备占用互斥锁（src/device/lock.ts；仅进程内有效）
+export { DeviceBusyError, acquireDevice, isDeviceBusy, withDeviceLease } from "./device/lock";
+export type { AcquireDeviceOptions, DeviceLease } from "./device/lock";
+
+// ---- 感知与通道提速（工作组 A：item-1 / 2 / 7 / 9） --------------------------
+
+// adb 路径 memo + per-device 持久 shell 复用层（src/device/adb.ts）
+export {
+  AdbShellClosedError,
+  AdbShellTimeoutError,
+  PersistentAdbShell,
+  clearAdbPathMemo,
+  closeAllPersistentShells,
+  disablePersistentShellForDevice,
+  enablePersistentShellForDevice,
+  persistentShellEnabledFor,
+  runShellCommand,
+} from "./device/adb";
+export type { EnablePersistentShellOptions } from "./device/adb";
+
+// dump XML 读取路径 memo（src/inspector/dump.ts）
+export { clearDumpReadPathMemo } from "./inspector/dump";
+
+// per-device UI 缓存注册表（src/utils/uiCache.ts）
+export {
+  UICache,
+  disableDeviceUiCache,
+  enableDeviceUiCache,
+  getDeviceUiCache,
+  invalidateDeviceUiCache,
+} from "./utils/uiCache";
+
+// 行为随机化原语（src/actions/actions.ts；默认关闭，调用点按需启用）
+export { jitterInt, jitteredDelayMs, setJitterRngForTests } from "./actions/actions";
+export type { JitterRng } from "./actions/actions";
+
+// ---- 抢票闭环（工作组 C：item-4 / 5 / 6 / 8） --------------------------------
+
+// 抢票阻断词表分类（src/damai/actions.ts；词表在 DamaiSelectors 上可整体覆盖）
+export { classifyGrabBlocker } from "./damai/actions";
+export type { GrabBlocker, GrabBlockerKind, GrabErrorCategory } from "./damai/actions";

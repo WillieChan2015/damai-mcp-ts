@@ -21,10 +21,16 @@
 | 🚀 **零依赖额外二进制** | 复用本地 `adb`（雷电 / MuMu / SDK 都自带） |
 | 🔌 **标准 MCP 协议** | 直接接入 Claude Code / Cursor / Cline / Continue |
 | 🧠 **大麦专属** | `damaiGrab()` 一行调用完成"等开票 → 抢档 → 选人 → 提交" |
+| 🎯 **NTP 对时生效** | 3 次采样取最小 RTT，offset 修正开票基准（免疫宿主机钟差）并给出 ±ms 误差区间 |
+| 🔁 **有界重试泵** | 可重试失败按指数退避整体重抢（默认 1 次＝不重试）；失败自动分类（验证码/会话/售罄/限购/人数太多弹窗），`needs_action` 防重复下单绝不重试；`max_runtime_sec` 硬停止（MCP 默认 600s） |
+| 🧾 **订单已见验证** | 提交后只读验证窗口确认订单/收银台证据（`order_seen`），永不降级、永不自动支付 |
+| 🙋 **验证码人工接管** | 命中滑块返回 `needs_human_captcha`（区别于 failed），绝不自动过滑块 |
+| 🔒 **设备占用互斥** | 同一设备的 grab / checklist / monitor 调用经进程内占用锁互斥，冲突立即报 `DeviceBusyError` |
+| ⚙️ **性能开关（默认关）** | per-device UI dump 缓存（UICache）与持久 ADB shell 通道为库级显式启用；未启用零参与，命令逐字节与旧版一致 |
 | 📸 **自动截图归档** | 失败时自动存 `damai_shots/` 便于复盘 |
-| ⏱️ **毫秒级等待** | 内部用 `setTimeout` 高精度 sleep + 末段忙等，不浪费开票瞬间 |
+| ⏱️ **毫秒级等待** | 内部用 `setTimeout` 分段 sleep，末段（<200ms）一次精确睡满，不浪费开票瞬间 |
 | 🛰️ **只读余票监控** | `damai_monitor_availability` 轮询详情页判定 available / not_on_sale / sold_out / unknown，绝不点击购买、绝不提交订单 |
-| 📣 **微信开票通知** | `notify_send` 经 ClawBot 机器人发送文本提醒；超时＝送达状态未知（timeout_unknown），绝不自动重发 |
+| 📣 **微信开票通知** | `notify_send` 经 ClawBot 机器人发送文本提醒；超时＝送达状态未知（timeout_unknown），绝不自动重发；token 可经库级 API 存入 0600 凭证文件（MCP 工具的文件回落接线规划中） |
 
 ---
 

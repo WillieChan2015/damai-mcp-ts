@@ -8,6 +8,7 @@ import { DOMParser } from "@xmldom/xmldom";
 import * as xpath from "xpath";
 
 import { UIElementNotFoundError } from "../utils/errors";
+import { getDeviceUiCache } from "../utils/uiCache";
 import { type Bounds, UIElement, parseBounds } from "./models";
 import { dumpUi } from "./dump";
 
@@ -278,7 +279,11 @@ async function waitFor(
   while (performance.now() < deadline) {
     let elements: UIElement[];
     try {
-      elements = await dumpUi(deviceId);
+      // per-device UICache 注册（enableDeviceUiCache）后经缓存读取：同一轮询
+      // 窗口内共享一次 dump（指纹命中则整体跳过）；未注册时保持裸 dumpUi 的
+      // 旧行为（逐字一致）。UICache 内部 dump 抛错同样原样上抛走本分支。
+      const cache = getDeviceUiCache(deviceId);
+      elements = cache !== null ? await cache.get(deviceId) : await dumpUi(deviceId);
     } catch (exc) {
       lastError = exc;
       await sleep(pollInterval * 1000);

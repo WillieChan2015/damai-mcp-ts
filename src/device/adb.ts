@@ -236,30 +236,53 @@ function collectStream(stream: Readable, chunks: Buffer[]): Promise<void> {
 }
 
 /**
+ * {@link whichAdb} 的进程内 memo：`undefined` = 尚未扫描；`null` = 扫描过但
+ * 未找到（null 也缓存——adb 缺失时避免每次调用都重扫 PATH）；`string` =
+ * 首次命中的完整路径。
+ */
+let adbPathMemo: string | null | undefined = undefined;
+
+/**
+ * 清空 {@link whichAdb} 的路径 memo，迫使下一次调用重新扫描 PATH 与候选路径。
+ *
+ * 供测试重置，以及 {@link adb} 在 spawn ENOENT（缓存的二进制已失效，如被
+ * 卸载/升级）时的自愈：清空后立即重扫一次，让后续调用拿到新鲜路径。
+ */
+export function clearAdbPathMemo(): void {
+  adbPathMemo = undefined;
+}
+
+/**
  * 定位 adb 二进制。返回完整路径，未找到时返回 null。
  *
  * 先探测 PATH，再依次尝试常见模拟器自带位置（对应 Python 版的候选列表）。
+ * 首次成功探测后结果被进程内 memo 缓存（{@link clearAdbPathMemo} 可重置）；
+ * 首次调用的语义与不 memo 时逐字一致。
  */
 export function whichAdb(): string | null {
-  const found = whichBinary(ADB_BIN);
-  if (found) {
-    return found;
+  if (adbPathMemo !== undefined) {
+    return adbPathMemo;
   }
-  const candidates = [
-    // 本项目使用的雷电 9 默认安装路径。
-    join("D:/leidian/LDPlayer9", ADB_BIN),
-    join("C:/Program Files/LDPlayer", ADB_BIN),
-    join("C:/Program Files/LDPlayer9", ADB_BIN),
-    join("C:/Program Files/Nox/bin", ADB_BIN),
-    join("C:/Program Files/MuMu", ADB_BIN),
-    join("C:/platform-tools", ADB_BIN),
-  ];
-  for (const p of candidates) {
-    if (existsSync(p)) {
-      return p;
+  let result: string | null = whichBinary(ADB_BIN);
+  if (!result) {
+    const candidates = [
+      // 本项目使用的雷电 9 默认安装路径。
+      join("D:/leidian/LDPlayer9", ADB_BIN),
+      join("C:/Program Files/LDPlayer", ADB_BIN),
+      join("C:/Program Files/LDPlayer9", ADB_BIN),
+      join("C:/Program Files/Nox/bin", ADB_BIN),
+      join("C:/Program Files/MuMu", ADB_BIN),
+      join("C:/platform-tools", ADB_BIN),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        result = p;
+        break;
+      }
     }
   }
-  return null;
+  adbPathMemo = result;
+  return result;
 }
 
 /**
@@ -332,6 +355,10 @@ export async function adb(...args: (string | AdbOptions)[]): Promise<ADBResult> 
       throw new ADBError(`adb 命令超时（>${formatPyFloat(timeout)}s）: ${cmd.join(" ")}`);
     }
     if (exc instanceof Error && "code" in exc && (exc as NodeJS.ErrnoException).code === "ENOENT") {
+      // 自愈：memo 里的二进制可能已被卸载/升级——清空 memo 并重扫一次（让
+      // 后续调用拿到新鲜路径）；本次仍按原语义抛错。
+      clearAdbPathMemo();
+      whichAdb();
       throw new ADBError(`adb 二进制无法执行: ${binPath}`);
     }
     throw exc;
@@ -942,4 +969,216 @@ export class PersistentAdbShell {
     this.stderr.removeListener("data", this.onStderrData);
     this.child.removeListener("error", this.onChildError);
   }
+}
+
+// ---------------------------------------------------------------------------
+// per-device 持久 shell 复用层（注册表 + 懒打开 + idle TTL）
+//
+// 抢票热路径（tap/swipe 高频连击）按设备复用一条 {@link PersistentAdbShell}，
+// 省去每条命令冷启动一次 adb 客户端进程的开销。设计约定：
+//   * 默认无操作：未 {@link enablePersistentShellForDevice} 的设备上
+//     {@link persistentShellEnabledFor} 为 false，调用方（actions/dump）走
+//     原一次性 shell() 路径，行为与现状逐字一致；
+//   * 通道级失败（回执超时 / 会话关闭 / EOF）由 {@link runShellCommand} 摘除
+//     条目并向上抛，由调用方回落一次性 spawn 重试一次；
+//   * idle TTL（默认 60s，timer.unref()）在每条命令后重置，超时自动 close，
+//     防长驻 MCP server 进程泄漏；TTL 关闭只摘除会话，配置保留，下一条命令
+//     按需重开（进程死亡同理重建）。
+// ---------------------------------------------------------------------------
+
+/** {@link enablePersistentShellForDevice} 的选项。 */
+export interface EnablePersistentShellOptions {
+  /** 单条回执等待上限（毫秒）。缺省 4000（对齐 {@link PersistentAdbShell} 默认值）。 */
+  receiptTimeoutMs?: number;
+  /** 空闲自动关闭的 TTL（毫秒）。缺省 60000；每条命令完成后重置。 */
+  idleTtlMs?: number;
+}
+
+/** 默认 idle TTL（毫秒）：防长驻 MCP server 进程泄漏。 */
+const PERSISTENT_DEFAULT_IDLE_TTL_MS = 60_000;
+
+/** 未传 deviceId 时的注册表键。 */
+const DEFAULT_DEVICE_KEY = "__default__";
+
+interface PersistentShellConfig {
+  readonly receiptTimeoutMs: number;
+  readonly idleTtlMs: number;
+}
+
+interface PersistentShellLease {
+  shell: PersistentAdbShell;
+  idleTimer: NodeJS.Timeout | null;
+}
+
+/** 启用配置（deviceId → 配置）；未启用 / 已停用的设备不在表中。 */
+const persistentShellConfigs = new Map<string, PersistentShellConfig>();
+
+/** 已打开的持久 shell 会话（deviceId → 会话 + idle 定时器）。 */
+const persistentShellLeases = new Map<string, PersistentShellLease>();
+
+function persistentShellKey(deviceId: string | null): string {
+  return deviceId ?? DEFAULT_DEVICE_KEY;
+}
+
+/** 指定设备是否已启用持久 shell 复用（未启用时调用方应走一次性 shell() 路径）。 */
+export function persistentShellEnabledFor(deviceId: string | null): boolean {
+  return persistentShellConfigs.has(persistentShellKey(deviceId));
+}
+
+/**
+ * 为设备启用持久 shell 复用（懒打开：首条命令时才 spawn 交互进程）。
+ *
+ * 抢票热路径建议在进入连击流水线前启用、finally 中
+ * {@link disablePersistentShellForDevice}；进程退出钩子调用
+ * {@link closeAllPersistentShells}。
+ */
+export function enablePersistentShellForDevice(
+  deviceId: string | null,
+  opts?: EnablePersistentShellOptions,
+): void {
+  persistentShellConfigs.set(persistentShellKey(deviceId), {
+    receiptTimeoutMs: opts?.receiptTimeoutMs ?? PERSISTENT_DEFAULT_RECEIPT_TIMEOUT_MS,
+    idleTtlMs: opts?.idleTtlMs ?? PERSISTENT_DEFAULT_IDLE_TTL_MS,
+  });
+}
+
+/** 停用设备的持久 shell 复用：摘除配置并关闭（若在）已打开的会话。 */
+export async function disablePersistentShellForDevice(deviceId: string | null): Promise<void> {
+  const key = persistentShellKey(deviceId);
+  persistentShellConfigs.delete(key);
+  const lease = persistentShellLeases.get(key);
+  if (lease === undefined) {
+    return;
+  }
+  persistentShellLeases.delete(key);
+  if (lease.idleTimer !== null) {
+    clearTimeout(lease.idleTimer);
+    lease.idleTimer = null;
+  }
+  await lease.shell.close();
+}
+
+/**
+ * 关闭并丢弃全部持久 shell（含配置）——供进程退出钩子与测试清理调用。
+ */
+export async function closeAllPersistentShells(): Promise<void> {
+  persistentShellConfigs.clear();
+  const leases = [...persistentShellLeases.values()];
+  persistentShellLeases.clear();
+  await Promise.all(
+    leases.map((lease) => {
+      if (lease.idleTimer !== null) {
+        clearTimeout(lease.idleTimer);
+        lease.idleTimer = null;
+      }
+      return lease.shell.close();
+    }),
+  );
+}
+
+/** 回执输出中的错误行启发（持久通道无远端退出码，见类注释 deviation）。 */
+const PERSISTENT_OUTPUT_ERROR_LINE_RE = /^\s*(?:Error|Exception)\b/;
+
+/** 提取回执输出中第一个 Error/Exception 开头的行；无则 null。 */
+function findPersistentOutputErrorLine(output: string): string | null {
+  if (output === "") {
+    return null;
+  }
+  for (const line of output.split("\n")) {
+    if (PERSISTENT_OUTPUT_ERROR_LINE_RE.test(line)) {
+      return line;
+    }
+  }
+  return null;
+}
+
+/** 摘除会话条目并关闭（幂等；超时路径上会话已自行 close）。 */
+function dropPersistentShellLease(key: string, lease: PersistentShellLease): void {
+  if (persistentShellLeases.get(key) === lease) {
+    persistentShellLeases.delete(key);
+  }
+  if (lease.idleTimer !== null) {
+    clearTimeout(lease.idleTimer);
+    lease.idleTimer = null;
+  }
+  void lease.shell.close();
+}
+
+/** 命令完成后重置 idle TTL 定时器（超时自动 close 并摘除，配置保留可重开）。 */
+function resetPersistentShellIdleTimer(
+  key: string,
+  lease: PersistentShellLease,
+  idleTtlMs: number,
+): void {
+  if (lease.idleTimer !== null) {
+    clearTimeout(lease.idleTimer);
+  }
+  lease.idleTimer = setTimeout(() => {
+    lease.idleTimer = null;
+    if (persistentShellLeases.get(key) === lease) {
+      persistentShellLeases.delete(key);
+    }
+    void lease.shell.close();
+  }, idleTtlMs);
+  lease.idleTimer.unref();
+}
+
+/**
+ * 在 per-device 持久 shell 上执行一条单行命令并等待 marker 回执。
+ *
+ * 会话按需打开并按设备复用：进程死亡 / idle TTL 关闭后下一条命令自动重建。
+ * 收到 {@link AdbShellTimeoutError} / {@link AdbShellClosedError} 时摘除该
+ * 设备的会话条目并向上抛——由调用方回落一次性 spawn 重试一次。
+ *
+ * deviation：持久通道无远端退出码，命令级失败靠文本启发检测——回执输出中
+ * 出现 `Error` / `Exception` 开头的行时抛 {@link ADBError}（中文信息）。
+ *
+ * @param cmd 单行命令文本（不含 `; echo <marker>` 尾巴，由会话协议追加）。
+ * @throws {TypeError} cmd 含换行符或与回执 marker 同文；
+ *   {@link ADBError} adb 未找到 / 远端报错启发命中；
+ *   {@link AdbShellTimeoutError} / {@link AdbShellClosedError} 通道级失败。
+ */
+export async function runShellCommand(
+  cmd: string,
+  opts: { deviceId?: string | null; receiptTimeoutMs?: number } = {},
+): Promise<string> {
+  const deviceId = opts.deviceId ?? null;
+  const key = persistentShellKey(deviceId);
+  const config = persistentShellConfigs.get(key) ?? {
+    receiptTimeoutMs: PERSISTENT_DEFAULT_RECEIPT_TIMEOUT_MS,
+    idleTtlMs: PERSISTENT_DEFAULT_IDLE_TTL_MS,
+  };
+
+  let lease = persistentShellLeases.get(key);
+  if (lease !== undefined && !lease.shell.alive) {
+    // 进程死亡重建：摘除死会话（close 幂等，仅清理监听）后按需重开
+    dropPersistentShellLease(key, lease);
+    lease = undefined;
+  }
+  if (lease === undefined) {
+    const shell = await PersistentAdbShell.open({
+      deviceId,
+      receiptTimeoutMs: config.receiptTimeoutMs,
+    });
+    lease = { shell, idleTimer: null };
+    persistentShellLeases.set(key, lease);
+  }
+
+  let output: string;
+  try {
+    output = await lease.shell.run(cmd, {
+      receiptTimeoutMs: opts.receiptTimeoutMs ?? config.receiptTimeoutMs,
+    });
+  } catch (exc) {
+    // 通道级失败（回执超时 / EOF / 会话关闭）：摘除条目并向上抛，由调用方回落
+    dropPersistentShellLease(key, lease);
+    throw exc;
+  }
+  resetPersistentShellIdleTimer(key, lease, config.idleTtlMs);
+
+  const errLine = findPersistentOutputErrorLine(output);
+  if (errLine !== null) {
+    throw new ADBError(`持久 shell 命令执行失败: ${errLine}`);
+  }
+  return output;
 }

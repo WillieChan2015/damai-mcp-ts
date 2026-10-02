@@ -5,7 +5,8 @@
  * - `damai/actions`（对应 Python monkeypatch `checklist.damai_grab` 等模块属性；
  *   TS 的 ESM 具名导入不可变，改为在来源模块上用 vi.mock 打桩）；
  * - `utils/ntp`（Python 版允许真实 NTP 查询在测试里失败后继续；TS 侧直接把
- *   `async_query` mock 成立即失败，既保持「无 NTP 也继续」的路径又避免触网）；
+ *   `querySampled` mock 成立即失败，既保持「无 NTP 也继续」的路径又避免触网；
+ *   需要 NTP 生效的用例再用 mockResolvedValue 提供确定性的采样结果）；
  * - `DeviceManager.shared`（对应 Python monkeypatch 该 classmethod 返回
  *   `_FakeDeviceManager`，用 vi.spyOn 静态方法实现）。
  */
@@ -28,6 +29,7 @@ import {
 } from "../src/damai/checklist";
 import { DeviceInfo, DeviceManager } from "../src/device/manager";
 import { UIElement } from "../src/inspector/models";
+import { NtpSampleResult } from "../src/utils/ntp";
 
 // ---- 模块级桩 ------------------------------------------------------------------
 
@@ -35,7 +37,7 @@ const {
   grabMock,
   loginMock,
   openMock,
-  asyncQueryMock,
+  querySampledMock,
   dumpUiMock,
   swipeMock,
   screenshotMock,
@@ -46,8 +48,10 @@ const {
   loginMock: vi.fn<(...args: unknown[]) => Promise<Record<string, unknown>>>(),
   /** `damai/actions.damaiOpenConcert` 桩。 */
   openMock: vi.fn<(...args: unknown[]) => Promise<Record<string, unknown>>>(),
-  /** `utils/ntp.asyncQuery` 桩。 */
-  asyncQueryMock: vi.fn<(...args: unknown[]) => Promise<never>>(),
+  /** `utils/ntp.querySampled` 桩（与真实签名同形，便于 mockResolvedValue 采样结果）。 */
+  querySampledMock: vi.fn<
+    (...args: unknown[]) => Promise<NtpSampleResult>
+  >(),
   /** `inspector/dump.dumpUi` 桩（waitForSaleStart 的倒计时节点观察 + 预热 warm dump）。 */
   dumpUiMock: vi.fn<(...args: unknown[]) => Promise<UIElement[]>>(),
   /** `actions/actions.swipe` 桩（waitForSaleStart 的下拉刷新手势）。 */
@@ -67,7 +71,7 @@ vi.mock("../src/damai/actions", async (importOriginal) => {
 });
 vi.mock("../src/utils/ntp", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/utils/ntp")>();
-  return { ...actual, asyncQuery: asyncQueryMock };
+  return { ...actual, querySampled: querySampledMock };
 });
 // waitForSaleStart 经 dumpUi 观察倒计时节点、经 swipe 执行刷新手势：
 // ESM 具名导入不可变，桩落在来源模块上（与本文件其余 mock 同一约定）。
@@ -97,7 +101,7 @@ beforeEach(() => {
   vi.spyOn(DeviceManager, "shared").mockReturnValue(fakeManager);
 
   // NTP 同步为尽力而为：桩成立即失败，走「无 NTP 继续」分支
-  asyncQueryMock.mockRejectedValue(new Error("NTP 在测试中被 mock 禁用"));
+  querySampledMock.mockRejectedValue(new Error("NTP 在测试中被 mock 禁用"));
 });
 
 afterEach(() => {
@@ -472,7 +476,7 @@ describe("waitForSaleStart 主循环", () => {
 });
 
 describe("run_checklist（open_time + 去抖门）", () => {
-  it("带 open_time 时经去抖门等待跑完整流程，openTime 仍透传给 damaiGrab", async () => {
+  it("带 open_time 时经去抖门等待跑完整流程，Phase 4 以立即模式调 damaiGrab（不透传 openTime）", async () => {
     loginMock.mockResolvedValue({ logged_in: true });
     openMock.mockResolvedValue({ item_id: "1", loaded: true, elapsed_ms: 0 });
     grabMock.mockResolvedValue({ status: "submitted", elapsed_ms: 1, item_id: "1" });
@@ -505,11 +509,16 @@ describe("run_checklist（open_time + 去抖门）", () => {
     expect(phaseNames).toContain("countdown");
     expect(phaseNames).toContain("grab_fire");
     expect(res.status).toBe("submitted");
-    // Phase 4 仍把 openTime 透传给 damaiGrab（第 6 个位置参数），不绕过其内置闸门
-    expect(grabMock.mock.calls[0]?.[5]).toBe(openTime);
+    // N1 修复：门启用时 checklist 是唯一时间权威——Phase 4 以立即模式（空串）
+    // 调 damaiGrab，不再透传 openTime（否则 damaiGrab 按未修正墙钟重睡会吞掉
+    // offset 修正与门的提前量）
+    expect(grabMock.mock.calls[0]?.[5]).toBe("");
+    // 门确认的触发方式写进结果
+    expect(res.saleTrigger).toBe("gate");
+    expect(res.toDict()["sale_trigger"]).toBe("gate");
   });
 
-  it("signalGateDisabled=true 时回退为纯 countdownLoop（旧行为）", async () => {
+  it("signalGateDisabled=true 时回退为纯 countdownLoop（旧行为），openTime 仍透传给 damaiGrab", async () => {
     loginMock.mockResolvedValue({ logged_in: true });
     openMock.mockResolvedValue({ item_id: "1", loaded: true, elapsed_ms: 0 });
     grabMock.mockResolvedValue({ status: "submitted", elapsed_ms: 1, item_id: "1" });
@@ -525,5 +534,145 @@ describe("run_checklist（open_time + 去抖门）", () => {
     expect(res.phases.map((p) => p.phase)).toContain("countdown");
     // 只剩 Phase 2.5 warm dump 的 2 次 dumpUi——去抖门主循环没有做 UI 观察
     expect(dumpUiMock).toHaveBeenCalledTimes(2);
+    // 逃生路径保持旧行为：Phase 4 仍透传原 openTime（第 6 个位置参数）
+    expect(grabMock.mock.calls[0]?.[5]).toBe("2020-01-01 10:00:00");
+    // 门未参与 → sale_trigger 为 null
+    expect(res.saleTrigger).toBeNull();
+  });
+
+  it("NTP 成功时 targetUnix 应用 offset：timer 路径提前 offset 触发，且 Phase 4 立即模式", async () => {
+    loginMock.mockResolvedValue({ logged_in: true });
+    openMock.mockResolvedValue({ item_id: "1", loaded: true, elapsed_ms: 0 });
+    let grabAtMs = 0;
+    grabMock.mockImplementation(async () => {
+      grabAtMs = Date.now();
+      return { status: "submitted", elapsed_ms: 1, item_id: "1" };
+    });
+    // 基线永不建成（恒缺失）→ 纯定时器兜底，触发时刻 = 修正后 T0 + fallbackAfterMs
+    dumpUiMock.mockResolvedValue([]);
+    screenshotMock.mockResolvedValue(Buffer.alloc(0));
+    swipeMock.mockResolvedValue(undefined);
+    // 服务器超前本机 3s（offsetMs=+3000）：本机钟须提前 3s 到达「服务器 T0」
+    querySampledMock.mockResolvedValue(
+      new NtpSampleResult({
+        server: "pool.ntp.org",
+        offsetMs: 3000,
+        roundTripMs: 10,
+        uncertaintyMs: 6,
+        samples: 3,
+        sampledAtUnix: Date.now() / 1000,
+        serverUnix: Date.now() / 1000 + 3,
+      }),
+    );
+
+    // strftime 截断到整秒：目标 ≥ 5s 在未来，给候场 + 修正触发留足余量
+    const openTime = strftime("%Y-%m-%d %H:%M:%S", new Date(Date.now() + 5000));
+    const uncorrectedTargetMs = parseOpenTime(openTime)!.getTime();
+    const res = await runChecklist("127.0.0.1:5555", "1", {
+      openTime,
+      preheatSeconds: 0.05, // 跳过 warm dump（<5s），让 fireAt 紧贴目标
+      signalGateOptions: { gatePollMs: 5, fallbackAfterMs: 0 },
+    });
+
+    expect(res.status).toBe("submitted");
+    // NTP 结果全量写入
+    expect(res.ntpOffsetMs).toBe(3000);
+    expect(res.ntpUncertaintyMs).toBe(6);
+    expect(res.ntpSamples).toBe(3);
+    const d = res.toDict();
+    expect(d["ntp_offset_ms"]).toBe(3000);
+    expect(d["ntp_uncertainty_ms"]).toBe(6);
+    expect(d["ntp_samples"]).toBe(3);
+    expect(d["sale_trigger"]).toBe("timer");
+    // 门启用 → Phase 4 立即模式
+    expect(grabMock.mock.calls[0]?.[5]).toBe("");
+    // 关键断言：damaiGrab 在「修正后 T0（目标 − 3s）」附近被调，
+    // 而绝不可能等到未修正目标（countdownLoop 末段 1s tick 的 overshoot ≤ 1s，
+    // 已计入余量；未修正行为下 grabAt ≥ 目标时刻，必越界）
+    expect(grabAtMs).toBeGreaterThan(uncorrectedTargetMs - 3200);
+    expect(grabAtMs).toBeLessThan(uncorrectedTargetMs - 1500);
+  });
+
+  it("NTP 失败时行为回归：offset 不应用（targetUnix 不平移），NTP 字段为 null", async () => {
+    loginMock.mockResolvedValue({ logged_in: true });
+    openMock.mockResolvedValue({ item_id: "1", loaded: true, elapsed_ms: 0 });
+    let grabAtMs = 0;
+    grabMock.mockImplementation(async () => {
+      grabAtMs = Date.now();
+      return { status: "submitted", elapsed_ms: 1, item_id: "1" };
+    });
+    dumpUiMock.mockResolvedValue([]);
+    screenshotMock.mockResolvedValue(Buffer.alloc(0));
+    swipeMock.mockResolvedValue(undefined);
+    querySampledMock.mockRejectedValue(new Error("NTP 不可达"));
+
+    const openTime = strftime("%Y-%m-%d %H:%M:%S", new Date(Date.now() + 2000));
+    const targetMs = parseOpenTime(openTime)!.getTime();
+    const res = await runChecklist("127.0.0.1:5555", "1", {
+      openTime,
+      preheatSeconds: 0.05,
+      signalGateOptions: { gatePollMs: 5, fallbackAfterMs: 0 },
+    });
+
+    expect(res.status).toBe("submitted");
+    expect(res.ntpOffsetMs).toBeNull();
+    const d = res.toDict();
+    expect(d["ntp_offset_ms"]).toBeNull();
+    expect(d["ntp_uncertainty_ms"]).toBeNull();
+    expect(d["ntp_samples"]).toBeNull();
+    expect(d["sale_trigger"]).toBe("timer");
+    expect(grabMock.mock.calls[0]?.[5]).toBe("");
+    // 无修正：定时器兜底在未修正目标处触发（不会提前于目标 − 50ms）
+    expect(grabAtMs).toBeGreaterThanOrEqual(targetMs - 50);
+  });
+
+  it("门提前确认（提前开售场景）：damaiGrab 立即被调，不睡到未修正 T0", async () => {
+    loginMock.mockResolvedValue({ logged_in: true });
+    openMock.mockResolvedValue({ item_id: "1", loaded: true, elapsed_ms: 0 });
+    let grabAtMs = 0;
+    grabMock.mockImplementation(async () => {
+      grabAtMs = Date.now();
+      return { status: "submitted", elapsed_ms: 1, item_id: "1" };
+    });
+    // 序列：基线 3 次在场 → 主循环恒缺失（到点后连续 2 次由门确认开票）
+    const node = countdownNode();
+    dumpUiMock
+      .mockResolvedValueOnce([node])
+      .mockResolvedValueOnce([node])
+      .mockResolvedValueOnce([node])
+      .mockResolvedValue([]);
+    screenshotMock.mockResolvedValue(Buffer.alloc(0));
+    swipeMock.mockResolvedValue(undefined);
+    // 服务器超前 3s：门基于修正后 T0（目标 − 3s）确认，远早于未修正 T0
+    querySampledMock.mockResolvedValue(
+      new NtpSampleResult({
+        server: "pool.ntp.org",
+        offsetMs: 3000,
+        roundTripMs: 10,
+        uncertaintyMs: 6,
+        samples: 3,
+        sampledAtUnix: Date.now() / 1000,
+        serverUnix: Date.now() / 1000 + 3,
+      }),
+    );
+
+    const openTime = strftime("%Y-%m-%d %H:%M:%S", new Date(Date.now() + 5000));
+    const uncorrectedTargetMs = parseOpenTime(openTime)!.getTime();
+    const res = await runChecklist("127.0.0.1:5555", "1", {
+      openTime,
+      preheatSeconds: 2.0, // >1s：保证 countdownLoop 的 1s overshoot 不会越过修正后 T0
+      signalGateOptions: {
+        gatePollMs: 5,
+        fallbackAfterMs: 2000, // 放宽定时器兜底，确保门先于定时器确认
+      },
+    });
+
+    expect(res.status).toBe("submitted");
+    expect(res.saleTrigger).toBe("gate");
+    expect(grabMock.mock.calls[0]?.[5]).toBe("");
+    // 门确认 ≈ 修正后 T0（目标 − 3s）+ 2×poll，远早于未修正 T0；
+    // 未修正行为下门确认点 ≈ 未修正 T0，必越界
+    expect(grabAtMs).toBeGreaterThan(uncorrectedTargetMs - 3200);
+    expect(grabAtMs).toBeLessThan(uncorrectedTargetMs - 1500);
   });
 });

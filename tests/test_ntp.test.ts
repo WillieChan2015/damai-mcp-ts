@@ -290,6 +290,8 @@ describe("NtpSampleResult", () => {
     // getter：区间由 offset ± uncertainty 推出
     expect(r.intervalLoMs).toBeCloseTo(-28.63, 10);
     expect(r.intervalHiMs).toBeCloseTo(53.63, 10);
+    // serverUnix 为 additive 可选字段：直接构造不传时为 undefined（toDict 键面不变）
+    expect(r.serverUnix).toBeUndefined();
   });
 
   it.each([
@@ -351,6 +353,8 @@ describe("querySampled（假定时器，逐样本可推）", () => {
       expect(out.synced).toBe(true);
       // 收到最优样本响应的时刻 = 假时钟 35ms
       expect(out.sampledAtUnix).toBeCloseTo(1_700_000_000.035, 5);
+      // 最优样本的服务器时间戳 = 收包假时刻 + 真实偏差 250ms（querySampled 恒填）
+      expect(out.serverUnix).toBeCloseTo(1_700_000_000.285, 5);
     } finally {
       vi.useRealTimers();
     }
@@ -489,6 +493,8 @@ describe("querySampled（样本有效性门槛）", () => {
       expect(out.intervalLoMs).toBe(-1);
       expect(out.intervalHiMs).toBe(1);
       expect(out.synced).toBe(true);
+      // 有效样本（服务器偏差 0、冻结时钟）的 serverUnix = 冻结时刻
+      expect(out.serverUnix).toBeCloseTo(1_700_000_000, 5);
     } finally {
       vi.useRealTimers();
     }

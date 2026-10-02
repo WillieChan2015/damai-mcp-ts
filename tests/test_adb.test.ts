@@ -24,9 +24,16 @@ import {
   AdbShellTimeoutError,
   PersistentAdbShell,
   adb,
+  clearAdbPathMemo,
+  closeAllPersistentShells,
+  disablePersistentShellForDevice,
+  enablePersistentShellForDevice,
+  persistentShellEnabledFor,
+  runShellCommand,
   shell,
   whichAdb,
 } from "../src/device/adb";
+import { tap } from "../src/actions/actions";
 import { ADBError } from "../src/utils/errors";
 import {
   captureRejection,
@@ -74,6 +81,8 @@ let binDir = "";
 beforeEach(() => {
   binDir = makeTempAdbOnPath().binDir;
   vi.stubEnv("PATH", binDir);
+  // item-9：whichAdb 的进程内路径 memo 按用例重置，避免跨用例串味
+  clearAdbPathMemo();
 });
 
 afterEach(() => {
@@ -117,6 +126,65 @@ describe("whichAdb（对应 which_adb）", () => {
     vi.stubEnv("PATH", "");
     mocks.existsSyncImpl = () => true;
     expect(whichAdb()).not.toBeNull();
+  });
+});
+
+describe("whichAdb 路径 memo（item-9）", () => {
+  /** 在目录里放一个可执行的假 adb。 */
+  function writeFakeAdb(dir: string): string {
+    const bin = join(dir, process.platform === "win32" ? "adb.exe" : "adb");
+    writeFileSync(bin, "#!/bin/sh\nexit 0\n");
+    chmodSync(bin, 0o755);
+    return bin;
+  }
+
+  it("首次扫描后 memo 生效：PATH 变化不可见，clearAdbPathMemo 后重新探测", () => {
+    const dirA = mkdtempSync(join(tmpdir(), "damai-adb-memo-a-"));
+    const dirB = mkdtempSync(join(tmpdir(), "damai-adb-memo-b-"));
+    try {
+      const binA = writeFakeAdb(dirA);
+      const binB = writeFakeAdb(dirB);
+      vi.stubEnv("PATH", dirA);
+      expect(whichAdb()).toBe(binA); // 首扫并写 memo
+      vi.stubEnv("PATH", dirB);
+      expect(whichAdb()).toBe(binA); // memo 命中 → 仍返回旧路径
+      clearAdbPathMemo();
+      expect(whichAdb()).toBe(binB); // 重置后重新探测到新 PATH
+    } finally {
+      vi.unstubAllEnvs();
+      removeTempDir(dirA);
+      removeTempDir(dirB);
+    }
+  });
+
+  it("spawn ENOENT → 清空 memo 并重扫一次（自愈），本次仍按原语义抛错", async () => {
+    const dirB = mkdtempSync(join(tmpdir(), "damai-adb-memo-heal-"));
+    try {
+      // memo 先缓存 binDir（beforeEach 已清 memo 且 PATH=binDir）
+      expect(whichAdb()).toBe(join(binDir, process.platform === "win32" ? "adb.exe" : "adb"));
+      // PATH 切到 dirB（含新 adb），并让 spawn 以异步 error 事件报 ENOENT
+      // （真实 Node spawn 找不到二进制时的行为形态）
+      const binB = writeFakeAdb(dirB);
+      vi.stubEnv("PATH", dirB);
+      mocks.spawnImpl = () => {
+        const proc = new EventEmitter() as unknown as ChildProcess;
+        proc.kill = () => true; // adb() 的异常路径会补 SIGKILL
+        setImmediate(() => {
+          const err = new Error("spawn adb ENOENT");
+          (err as NodeJS.ErrnoException).code = "ENOENT";
+          proc.emit("error", err);
+        });
+        return proc;
+      };
+      const err = await captureRejection(adb("devices"));
+      expect(err).toBeInstanceOf(ADBError);
+      expect((err as Error).message).toMatch(/adb 二进制无法执行/);
+      // 自愈：memo 已被清空并按新 PATH 重扫刷新
+      expect(whichAdb()).toBe(binB);
+    } finally {
+      vi.unstubAllEnvs();
+      removeTempDir(dirB);
+    }
   });
 });
 
@@ -434,8 +502,10 @@ describe("PersistentAdbShell（借鉴 damai PersistentAdbShell）", () => {
     await noDevice.sh.close();
 
     // PATH 探测落空 + 模拟器候选路径全不存在（等价 patch which_adb → None）
+    // （本用例前半段已让 whichAdb 写入 memo，先清空再模拟 adb 消失）
     const emptyDir = mkdtempSync(join(tmpdir(), "damai-adb-empty-"));
     try {
+      clearAdbPathMemo();
       vi.stubEnv("PATH", emptyDir);
       mocks.existsSyncImpl = () => false;
       const err = await captureRejection(PersistentAdbShell.open());
@@ -459,5 +529,139 @@ describe("PersistentAdbShell（借鉴 damai PersistentAdbShell）", () => {
     await expect(sh.taps([])).resolves.toBeUndefined();
     expect(proc.rawWrites).toHaveLength(0);
     await sh.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// per-device 持久 shell 复用层（item-2）
+//
+// 复用本文件的 spawn mock 机制：交互 shell 打开（args 末位为 "shell"）返回
+// FakeShellProc；一次性 spawn（adb -s DEV shell <cmd> / exec-out …）返回
+// makeFakeProc 形态的进程（stdout 按批吐出后 close）。
+// ---------------------------------------------------------------------------
+
+/** 判定 spawn args 是否为持久 shell 的交互进程打开（`adb [-s DEV] shell`）。 */
+function isInteractiveShellOpen(args: readonly string[]): boolean {
+  return args[args.length - 1] === "shell" && args.length <= 3;
+}
+
+describe("per-device 持久 shell 复用层（item-2）", () => {
+  afterEach(async () => {
+    await closeAllPersistentShells();
+  });
+
+  /** 注册 spawn 桩：交互 shell 走 FakeShellProc（onLine 由回调决定），其余走一次性进程。 */
+  function useRegistryProcs(onLine: (line: string, fake: FakeShellProc) => void) {
+    const interactiveProcs: FakeShellProc[] = [];
+    const oneShotArgs: string[][] = [];
+    mocks.spawnImpl = (_file, args, opts) => {
+      if (isInteractiveShellOpen(args)) {
+        const proc = new FakeShellProc();
+        proc.onLine = onLine;
+        interactiveProcs.push(proc);
+        return proc as unknown as ChildProcess;
+      }
+      const { signal } = (opts ?? {}) as { signal?: AbortSignal };
+      oneShotArgs.push([...args]);
+      return makeFakeProc({ stdout: Buffer.alloc(0), returncode: 0, signal });
+    };
+    return { interactiveProcs, oneShotArgs };
+  }
+
+  it("enable 后 tap 走持久 shell：单行一次 write（CMD marker），未回落一次性", async () => {
+    enablePersistentShellForDevice("DEV", { receiptTimeoutMs: 2000 });
+    expect(persistentShellEnabledFor("DEV")).toBe(true);
+    const { interactiveProcs, oneShotArgs } = useRegistryProcs((line, fake) => fake.reply(line));
+    await tap("DEV", 100, 200);
+    expect(interactiveProcs).toHaveLength(1);
+    expect(interactiveProcs[0]!.rawWrites).toHaveLength(1);
+    expect(interactiveProcs[0]!.lines).toEqual(["input tap 100 200; echo __DMCTS_CMD_1_DONE__"]);
+    expect(oneShotArgs).toEqual([]); // 未回落一次性 shell
+  });
+
+  it("回执超时 → 回落一次性 shell 重试一次，池条目被摘除（下次重新 open）", async () => {
+    enablePersistentShellForDevice("DEV", { receiptTimeoutMs: 30 });
+    let replyEnabled = false;
+    const { interactiveProcs, oneShotArgs } = useRegistryProcs((line, fake) => {
+      if (replyEnabled) {
+        fake.reply(line);
+      }
+    });
+    await tap("DEV", 7, 8); // 持久回执超时 → 回落一次性 shell（成功）
+    expect(interactiveProcs).toHaveLength(1);
+    expect(oneShotArgs).toEqual([["-s", "DEV", "shell", "input tap 7 8"]]);
+    // 条目已被摘除：下一条命令重新 open（这次回执正常，不再回落）
+    replyEnabled = true;
+    await tap("DEV", 7, 8);
+    expect(interactiveProcs).toHaveLength(2);
+    expect(oneShotArgs).toHaveLength(1);
+  });
+
+  it("回执含 Exception 行 → 抛 ADBError「持久 shell 命令执行失败: …」", async () => {
+    enablePersistentShellForDevice("DEV");
+    const { interactiveProcs } = useRegistryProcs((line, fake) =>
+      fake.reply(line, {
+        prefix: Buffer.from("Exception: coordinate out of bounds\n"),
+      }),
+    );
+    const err = await captureRejection(
+      runShellCommand("input tap 1 2", { deviceId: "DEV", receiptTimeoutMs: 2000 }),
+    );
+    expect(err).toBeInstanceOf(ADBError);
+    expect((err as Error).message).toBe(
+      "持久 shell 命令执行失败: Exception: coordinate out of bounds",
+    );
+    // 启发式报错不摘条目：通道本身健康，同会话可继续执行
+    expect(persistentShellEnabledFor("DEV")).toBe(true);
+    expect(interactiveProcs).toHaveLength(1);
+  });
+
+  it("EOF/会话关闭 → runShellCommand 摘除条目并上抛 AdbShellClosedError", async () => {
+    enablePersistentShellForDevice("DEV", { receiptTimeoutMs: 2000 });
+    // 第一个会话永不回执（用 finish 触发 EOF）；重建的会话正常回执
+    const { interactiveProcs } = useRegistryProcs((line, fake) => {
+      if (fake !== interactiveProcs[0]) {
+        fake.reply(line);
+      }
+    });
+    const pending = runShellCommand("getprop", { deviceId: "DEV" });
+    await new Promise((resolve) => setImmediate(resolve));
+    interactiveProcs[0]!.finish(); // 进程死亡 → EOF 先于 marker
+    const err = await captureRejection(pending);
+    expect(err).toBeInstanceOf(AdbShellClosedError);
+    // 条目已摘除：下一条命令重新 open（本桩继续给新进程）
+    await expect(runShellCommand("getprop", { deviceId: "DEV" })).resolves.toBe("");
+    expect(interactiveProcs).toHaveLength(2);
+  });
+
+  it("idle TTL 到期自动 close 并摘除；下一条命令重开（fake timers）", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      enablePersistentShellForDevice("DEV", { idleTtlMs: 1000, receiptTimeoutMs: 2000 });
+      const { interactiveProcs } = useRegistryProcs((line, fake) => fake.reply(line));
+      await expect(runShellCommand("getprop", { deviceId: "DEV" })).resolves.toBe("");
+      expect(interactiveProcs).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      // TTL 到期：会话被 close（SIGTERM 已发出）并摘除
+      expect(interactiveProcs[0]!.killSignals).toContain("SIGTERM");
+      await expect(runShellCommand("getprop", { deviceId: "DEV" })).resolves.toBe("");
+      expect(interactiveProcs).toHaveLength(2); // 按需重开
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("disable 后回归一次性 shell() 路径（不再打开交互进程）", async () => {
+    enablePersistentShellForDevice("DEV", { receiptTimeoutMs: 2000 });
+    const { interactiveProcs, oneShotArgs } = useRegistryProcs((line, fake) => fake.reply(line));
+    await tap("DEV", 1, 2);
+    expect(interactiveProcs).toHaveLength(1);
+    expect(oneShotArgs).toEqual([]);
+    await disablePersistentShellForDevice("DEV");
+    expect(persistentShellEnabledFor("DEV")).toBe(false);
+    expect(interactiveProcs[0]!.killSignals).toContain("SIGTERM"); // 会话已关闭
+    await tap("DEV", 1, 2); // 回归一次性路径
+    expect(interactiveProcs).toHaveLength(1);
+    expect(oneShotArgs).toEqual([["-s", "DEV", "shell", "input tap 1 2"]]);
   });
 });

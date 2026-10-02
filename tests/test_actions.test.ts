@@ -6,9 +6,10 @@
  * `shell` / `adb`；TS 侧等价物是在文件顶层 `vi.mock("../src/device/adb")`
  * 替换同一层（actions.ts 正是从该模块导入 `adb` / `shell`）。
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { tap, type KeyName, screenshot, inputText, longPress, pressKey, scroll, swipe, doubleTap } from "../src/actions/actions";
+import { jitterInt, jitteredDelayMs, setJitterRngForTests } from "../src/actions/actions";
 import { adb, shell } from "../src/device/adb";
 import { ADBError } from "../src/utils/errors";
 import { fakeAdbResult } from "./helpers";
@@ -119,5 +120,67 @@ describe("atomic actions call adb correctly", () => {
     // 对应 Python 的 m.call_args.args[:3] == ("exec-out", "screencap", "-p")
     const call = vi.mocked(adb).mock.calls[0];
     expect(call?.slice(0, 3)).toEqual(["exec-out", "screencap", "-p"]);
+  });
+});
+
+describe("行为随机化原语（item-7）", () => {
+  afterEach(() => {
+    setJitterRngForTests(null); // 恢复 Math.random，避免泄漏到其他用例
+  });
+
+  it("jitterInt：边界 / 取整 / clamp 负值", () => {
+    expect(jitterInt(100, 4, () => 0)).toBe(96); // 下界
+    expect(jitterInt(100, 4, () => 0.5)).toBe(100); // 中心
+    expect(jitterInt(100, 4, () => 0.999)).toBe(104); // 上界（rng < 1）
+    expect(jitterInt(2.4, 0, () => 0.5)).toBe(2); // radius=0 → 仅取整
+    expect(jitterInt(2, 4, () => 0)).toBe(0); // 负值 clamp 到 0
+    expect(jitterInt(0, 3, () => 0.999)).toBe(3); // 0 附近不越界为负
+  });
+
+  it("jitteredDelayMs：±ratio 区间内，注入与默认 rng 均可", () => {
+    expect(jitteredDelayMs(1000, 0.2, () => 0)).toBe(800);
+    expect(jitteredDelayMs(1000, 0.2, () => 0.5)).toBe(1000);
+    expect(jitteredDelayMs(1000, 0.2, () => 0.999)).toBe(1200);
+    setJitterRngForTests(null); // 默认 Math.random
+    for (let i = 0; i < 20; i++) {
+      const v = jitteredDelayMs(1000, 0.2);
+      expect(v).toBeGreaterThanOrEqual(800);
+      expect(v).toBeLessThanOrEqual(1200);
+    }
+  });
+
+  it("jitterPx=0 时 tap 命令字符串与现状逐字节一致（回归）", async () => {
+    setJitterRngForTests(() => 0.99); // 即便 rng 会给出大抖动，不传 jitterPx 也不得消费
+    await tap("DEV", 100, 200);
+    expect(lastShellCmd()).toBe("input tap 100 200");
+    await tap("DEV", 100, 200, { jitterPx: 0 });
+    expect(lastShellCmd()).toBe("input tap 100 200");
+    await tap("DEV", 100, 200, { durationMs: 500, jitterPx: 0 });
+    expect(lastShellCmd()).toBe("input swipe 100 200 100 200 500");
+  });
+
+  it("jitterPx>0 且 rng 固定时命令坐标可预测", async () => {
+    setJitterRngForTests(() => 0.25);
+    await tap("DEV", 100, 200, { jitterPx: 4 });
+    // x = round(96 + 0.25*8) = 98；y = round(196 + 2) = 198
+    expect(lastShellCmd()).toBe("input tap 98 198");
+  });
+
+  it("jitterPx>0 时约 20% 概率把 50ms 按压时长变为 60-120ms（rng 序列可复现）", async () => {
+    setJitterRngForTests(() => 0.1); // < 0.2 → 触发；时长 = 60 + round(0.1*60) = 66
+    await tap("DEV", 50, 60, { jitterPx: 3 });
+    // x = round(47 + 0.6) = 48；y = round(57 + 0.6) = 58
+    expect(lastShellCmd()).toBe("input swipe 48 58 48 58 66");
+    setJitterRngForTests(() => 0.9); // ≥ 0.2 → 不触发
+    await tap("DEV", 50, 60, { jitterPx: 3 });
+    expect(lastShellCmd()).toBe("input tap 52 62");
+  });
+
+  it("显式 durationMs 与 jitterPx 并存时不改写调用方时长", async () => {
+    setJitterRngForTests(() => 0.05); // 会触发 roll，但 durationMs≠50 时跳过
+    await tap("DEV", 10, 20, { durationMs: 300, jitterPx: 2 });
+    const cmd = lastShellCmd();
+    expect(cmd.startsWith("input swipe")).toBe(true);
+    expect(cmd.endsWith("300")).toBe(true);
   });
 });

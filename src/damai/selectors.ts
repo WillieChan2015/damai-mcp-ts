@@ -34,6 +34,21 @@ export interface DamaiSelectorsInit {
   captchaIndicator?: string;
   /** 滑块验证码的滑块提示文本。 */
   captchaSwipeTo?: string;
+  /** 「抢票人数太多」类瞬时拥塞弹窗文案（可重试）。 */
+  crowdPopupWords?: string[];
+  /** 拥塞弹窗上的关闭/确认按钮文案（tap 后重试；这是关闭弹窗的 tap，不是支付/下单 tap）。 */
+  crowdPopupConfirmButtons?: string[];
+  /** 售罄类终局文案（不可重试）。 */
+  soldOutWords?: string[];
+  /** 限购/实名类终局文案（不可重试）。 */
+  restrictedWords?: string[];
+  /** 登录态失效文案（命中时抛 DamaiLoginExpiredError）。 */
+  sessionExpiredWords?: string[];
+  /**
+   * 提交订单后判定「订单已创建」的页面特征词（收银台/订单页元素）。
+   * {@link DamaiSelectors.paySuccessIndicator} 也会纳入检查，但不作为唯一证据。
+   */
+  orderConfirmIndicators?: string[];
 }
 
 /** 大麦动作用到的全部 UI 选择器。大麦更新后在此修改。 */
@@ -62,6 +77,21 @@ export class DamaiSelectors {
   readonly captchaIndicator: string;
   /** 滑块验证码的滑块提示文本。 */
   readonly captchaSwipeTo: string;
+  /** 「抢票人数太多」类瞬时拥塞弹窗文案（可重试）。 */
+  readonly crowdPopupWords: string[];
+  /** 拥塞弹窗上的关闭/确认按钮文案（tap 后重试；这是关闭弹窗的 tap，不是支付/下单 tap）。 */
+  readonly crowdPopupConfirmButtons: string[];
+  /** 售罄类终局文案（不可重试）。 */
+  readonly soldOutWords: string[];
+  /** 限购/实名类终局文案（不可重试）。 */
+  readonly restrictedWords: string[];
+  /** 登录态失效文案（命中时抛 DamaiLoginExpiredError）。 */
+  readonly sessionExpiredWords: string[];
+  /**
+   * 提交订单后判定「订单已创建」的页面特征词（收银台/订单页元素）。
+   * {@link DamaiSelectors.paySuccessIndicator} 也会纳入检查，但不作为唯一证据。
+   */
+  readonly orderConfirmIndicators: string[];
 
   constructor(init: DamaiSelectorsInit = {}) {
     this.tabHome = init.tabHome ?? "首页";
@@ -76,6 +106,44 @@ export class DamaiSelectors {
     this.loginButton = init.loginButton ?? "登录/注册";
     this.captchaIndicator = init.captchaIndicator ?? "请完成验证";
     this.captchaSwipeTo = init.captchaSwipeTo ?? "向右滑动滑块填充拼图";
+    this.crowdPopupWords = init.crowdPopupWords ?? [
+      "人数太多",
+      "抢票人数过多",
+      "排队人数较多",
+      "网络开小差",
+      "系统繁忙",
+    ];
+    this.crowdPopupConfirmButtons = init.crowdPopupConfirmButtons ?? [
+      "知道了",
+      "确定",
+      "重试",
+    ];
+    this.soldOutWords = init.soldOutWords ?? [
+      "已售罄",
+      "售罄",
+      "缺货",
+      "无票",
+      "已结束",
+    ];
+    this.restrictedWords = init.restrictedWords ?? [
+      "限购",
+      "实名",
+      "购买上限",
+      "已达上限",
+    ];
+    this.sessionExpiredWords = init.sessionExpiredWords ?? [
+      "登录已过期",
+      "请重新登录",
+      "登录失效",
+    ];
+    this.orderConfirmIndicators = init.orderConfirmIndicators ?? [
+      "订单提交成功",
+      "提交成功",
+      "立即支付",
+      "收银台",
+      "核销/入场信息",
+      "订单详情",
+    ];
   }
 }
 

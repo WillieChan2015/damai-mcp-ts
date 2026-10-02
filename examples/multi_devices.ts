@@ -2,8 +2,17 @@
 /**
  * Example: grab a ticket using multiple devices/accounts concurrently.
  *
- * Each emulator at a different ADB port runs its own 大麦 instance. We fire
- * `damaiGrab` in parallel via `Promise.allSettled` and print who wins.
+ * Each emulator at a different ADB port runs its own 大麦 instance. Every
+ * account runs the full `runChecklist` 编排（NTP 校正 + 详情页预热 + warm-dump +
+ * 开票去抖门），而不是裸 `damaiGrab`——多账号并发经 `Promise.allSettled` 发射，
+ * 结束后逐设备汇总 checklist 状态。
+ *
+ * 多设备注记：
+ *   - N 台设备会各自做一次 NTP 采样（querySampled，3 个 UDP 样本 × N）——UDP
+ *     查询之间无冲突，仅 stderr 日志会交错；
+ *   - 各 checklist 只操作各自的 device_id，互不共享设备状态；MCP 工具层的
+ *     设备占用锁（withDeviceLease）覆盖 server 路径，本示例直接并发调用库层，
+ *     不再额外包一层锁（N 台设备互不相同，进程内亦无竞争）。
  *
  * Usage:
  *     # 1. Start two emulators on different ports:
@@ -16,13 +25,11 @@
  *
  * （Python `examples/multi_devices.py` 的 TS 对应物。）
  */
-import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
 import { Command, CommanderError, InvalidArgumentError } from "commander";
 
-import { damaiGrab, parseIso } from "../src/damai/actions";
-import { formatPyFloat } from "../src/device/adb";
+import { runChecklist } from "../src/damai/checklist";
 import { configure as configureLogging } from "../src/utils/logging";
 
 /** 解析后的命令行参数（对应 Python 的 argparse.Namespace）。 */
@@ -81,36 +88,33 @@ async function mainAsync(args: Args): Promise<number> {
     accounts.push(...DEFAULT_ACCOUNTS);
   }
   console.log(`🚀 启动 ${accounts.length} 个 worker 并发抢票`);
-
-  // Pre-warm: parse target time once（按本地时区解析，与 strptime 语义一致）
-  let targetTs: number | null = null;
   if (args.open) {
-    targetTs = parseIso(args.open).getTime() / 1000;
-    const now = Date.now() / 1000;
-    const waitSec = targetTs - now - args.preheat;
-    if (waitSec > 0) {
-      console.log(
-        `⏰ 距开票 ${(targetTs - now).toFixed(0)}s，等待 ${waitSec.toFixed(0)}s 后开抢（预热 ${formatPyFloat(args.preheat)}s）`,
-      );
-      await sleep(waitSec * 1000);
-    }
+    console.log(
+      `⏰ 开票时间 ${args.open}，预热 ${args.preheat}s（各 worker 经 runChecklist 自行 NTP 校正并候场）`,
+    );
   }
 
-  const tasks = accounts.map((a) =>
-    damaiGrab(
-      a.device_id,
-      args.item,
-      args.price,
-      a.viewer_names,
-      1,
-      args.open,
-      { preheatSeconds: args.preheat },
-    ),
+  // 每账号跑完整 checklist：NTP 校正 → 连接检查 → 登录检查 → 详情页预热 →
+  // 并行 warm dump → 开票去抖门 → fire。倒计时进度与阶段切换逐设备打印。
+  const tasks = accounts.map((a, i) =>
+    runChecklist(a.device_id, args.item, {
+      openTime: args.open,
+      priceIndex: args.price,
+      viewerNames: a.viewer_names,
+      ticketNum: 1,
+      preheatSeconds: args.preheat,
+      onPhase: (phase) => {
+        console.log(`  [${i}] ▶ ${phase}`);
+      },
+      onProgress: (secondsLeft) => {
+        console.log(`  [${i}] ⏱ 距开票约 ${Math.max(0, Math.ceil(secondsLeft))}s`);
+      },
+    }),
   );
   // 对应 asyncio.gather(*tasks, return_exceptions=True)
   const results = await Promise.allSettled(tasks);
 
-  console.log(`\n=== 抢票结果 ===`);
+  console.log(`\n=== 抢票结果（每设备 checklist 状态） ===`);
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     if (r === undefined) {
@@ -118,10 +122,23 @@ async function mainAsync(args: Args): Promise<number> {
     }
     if (r.status === "rejected") {
       console.log(`  [${i}] ❌ 异常: ${excMessage(r.reason)}`);
-    } else {
-      const g = r.value;
-      console.log(`  [${i}] ${g.status}  (${g.elapsed_ms}ms)  ${g.error || "OK"}`);
+      continue;
     }
+    const c = r.value;
+    const ntpText = c.ntpOffsetMs === null ? "无" : `${c.ntpOffsetMs.toFixed(2)}ms`;
+    const triggerText = c.saleTrigger === null ? "-" : c.saleTrigger;
+    const grab = c.grabResult;
+    let grabText = "-";
+    if (grab !== null) {
+      const gStatus = typeof grab.status === "string" ? grab.status : "?";
+      const gElapsed = typeof grab.elapsed_ms === "number" ? `${grab.elapsed_ms}ms` : "?";
+      const gOrderUrl = typeof grab.order_url === "string" ? `  订单页: ${grab.order_url}` : "";
+      grabText = `${gStatus} (${gElapsed})${gOrderUrl}`;
+    }
+    console.log(
+      `  [${i}] ${c.status}  grab=${grabText}  ntp_offset=${ntpText}  ` +
+        `trigger=${triggerText}  error=${c.error || "OK"}`,
+    );
   }
   return 0;
 }

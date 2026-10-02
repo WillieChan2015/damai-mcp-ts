@@ -277,6 +277,13 @@ export interface NtpSampleResultInit {
   samples: number;
   /** 收到最优样本响应的时刻（Unix 秒）。 */
   sampledAtUnix: number;
+  /**
+   * 最优样本的服务器 Transmit Timestamp（Unix 秒）。
+   *
+   * 可选（additive）：既有直接构造 {@link NtpSampleResult} 的调用方不受影响；
+   * {@link querySampled} 返回时恒填该字段。
+   */
+  serverUnix?: number;
 }
 
 /**
@@ -300,6 +307,14 @@ export class NtpSampleResult {
   readonly samples: number;
   /** 收到最优样本响应的时刻（Unix 秒）。 */
   readonly sampledAtUnix: number;
+  /**
+   * 最优样本的服务器 Transmit Timestamp（Unix 秒）。
+   *
+   * 与 {@link NtpResult.serverUnix} 同语义；`querySampled` 恒填，直接构造时
+   * 可缺省（undefined）。注意与 {@link sampledAtUnix}（= t4 本地收包时刻）
+   * 语义不同——需要「服务器认为现在是几点」时用本字段。
+   */
+  readonly serverUnix: number | undefined;
 
   constructor(init: NtpSampleResultInit) {
     this.server = init.server;
@@ -308,6 +323,7 @@ export class NtpSampleResult {
     this.uncertaintyMs = init.uncertaintyMs;
     this.samples = init.samples;
     this.sampledAtUnix = init.sampledAtUnix;
+    this.serverUnix = init.serverUnix;
   }
 
   /** 误差区间下界（毫秒）：offsetMs − uncertaintyMs。 */
@@ -441,6 +457,7 @@ export async function querySampled(
     uncertaintyMs,
     samples: validSamples,
     sampledAtUnix: best.queriedAtUnix,
+    serverUnix: best.serverUnix,
   });
 }
 
