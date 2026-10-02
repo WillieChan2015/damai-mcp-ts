@@ -14,6 +14,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  DAMAI_ORDERS_URL,
+  NEEDS_ACTION_MESSAGE,
   damaiGrab,
   damaiLoginCheck,
   isInViewerNameList,
@@ -22,6 +24,7 @@ import {
 } from "../src/damai/actions";
 import { DamaiSelectors, GrabConfig } from "../src/damai/selectors";
 import { UIElement } from "../src/inspector/models";
+import { ADBError, UIElementNotFoundError } from "../src/utils/errors";
 
 // ---- 桩（vi.hoisted 保证先于 vi.mock 工厂与静态导入初始化） --------------------
 
@@ -225,6 +228,8 @@ describe("damai_grab", () => {
     expect(result.status).toBe("ready_for_human");
     expect(result.requires_human_confirmation).toBe(true);
     expect(result.payment_started).toBe(false);
+    // 订单请求尚未发出：不携带官方订单页指引（仅 submitted / needs_action 携带）
+    expect(result.order_url).toBeUndefined();
     // Python 版 `confirm.assert_not_awaited()`：damai_confirm_order 与
     // damai_grab 同模块、无法直接打桩，以其唯一入口 waitForElement 请求
     // 「确认订单 / 立即支付」按钮从未发生作为等价断言
@@ -233,5 +238,146 @@ describe("damai_grab", () => {
     );
     expect(requestedSelectors).not.toContain("text=确认订单");
     expect(requestedSelectors).not.toContain("text=立即支付");
+  });
+});
+
+// ---- 提交订单三态语义（防重复下单）---------------------------------------------
+
+/**
+ * 提交段三态语义的公共桩：登录/前台/详情页/票档全部放行，只有「确认订单」
+ * 按钮的点击结果由用例通过 `confirmTapBehavior` 决定。
+ *
+ * 按钮以坐标区分：确认订单元素 bounds [500,1200,700,1260] → 中心 (600,1230)，
+ * 与前置阶段的购买按钮 (5,5) / 票档 (100,130) 不重叠，tapMock 按落点分流。
+ */
+async function runGrabToConfirm(
+  confirmTapBehavior: () => Promise<void>,
+  { screenshotError }: { screenshotError?: Error } = {},
+): Promise<Awaited<ReturnType<typeof damaiGrab>>> {
+  const buyButton = new UIElement({ tag: "node", text: "Buy", bounds: [0, 0, 10, 10] });
+  const confirmButton = new UIElement({
+    tag: "node",
+    text: "确认订单",
+    bounds: [500, 1200, 700, 1260],
+  });
+  const [confirmX, confirmY] = confirmButton.center;
+
+  // damai_login_check：前台 + 已登录
+  shellMock.mockImplementation(async (...args: unknown[]) => {
+    const argv = shellArgv(args);
+    if (argv[0] === "dumpsys" && argv[1] === "activity") {
+      return "… cn.damai …（前台）";
+    }
+    return ""; // dumpsys window windows：无安全验证 Activity
+  });
+  assertTextMock.mockResolvedValue(false);
+  // damai_open_concert / 购买按钮 / 票档弹层 / 确认订单 共用 waitForElement 桩，
+  // 按选择器分流：仅「确认订单」返回独立元素（供 tapMock 按坐标识别）
+  waitForElementMock.mockImplementation(async (...args: unknown[]) => {
+    const selector = args[1] as string;
+    if (selector === "text=确认订单") {
+      return confirmButton;
+    }
+    return buyButton;
+  });
+  // damai_select_price 的 dumpUi 桩：一个 ¥ 票档元素（viewerNames=null，跳过观演人）
+  dumpUiMock.mockResolvedValue([
+    new UIElement({ tag: "node", text: "¥680", bounds: [0, 100, 200, 160] }),
+  ]);
+  tapMock.mockImplementation(async (...args: unknown[]) => {
+    const x = args[1] as number;
+    const y = args[2] as number;
+    if (x === confirmX && y === confirmY) {
+      await confirmTapBehavior();
+    }
+  });
+  screenshotMock.mockImplementation(async () => {
+    if (screenshotError !== undefined) {
+      throw screenshotError;
+    }
+    return Buffer.alloc(0);
+  });
+  waitMsMock.mockResolvedValue(undefined);
+  mkdirSyncMock.mockReturnValue(undefined);
+
+  return damaiGrab("device", "item", 1, null, 1, "", { confirmOrder: true });
+}
+
+describe("damai_grab 提交订单三态语义", () => {
+  it("confirmOrder=true 快乐路径 → submitted 且携带官方订单页 URL", async () => {
+    const result = await runGrabToConfirm(async () => {});
+
+    expect(result.status).toBe("submitted");
+    expect(result.order_url).toBe(DAMAI_ORDERS_URL);
+    expect(result.error).toBeNull();
+    expect(result.requires_human_confirmation).toBe(false);
+    expect(result.payment_started).toBe(false);
+    expect(result.screenshots).toHaveLength(1);
+  });
+
+  it("确认按钮定位成功后 tap 抛 ADBError → needs_action（结果未知，不报 failed）", async () => {
+    const result = await runGrabToConfirm(async () => {
+      throw new ADBError("模拟：确认订单点击传输失败");
+    });
+
+    expect(result.status).toBe("needs_action");
+    // error 恒以固定中文句式开头，原因子句携带底层异常文本
+    expect(result.error?.startsWith(NEEDS_ACTION_MESSAGE)).toBe(true);
+    expect(result.error).toContain("模拟：确认订单点击传输失败");
+    expect(result.order_url).toBe(DAMAI_ORDERS_URL);
+    expect(result.requires_human_confirmation).toBe(true);
+    expect(result.payment_started).toBe(false);
+  });
+
+  it("确认订单阶段抛 UIElementNotFoundError → 仍按失败上抛（定位失败 ≠ 已发单）", async () => {
+    // 既有语义：定位类异常原样上抛（外层 catch 只兜 DamaiGrabFailedError /
+    // DamaiLoginExpiredError），绝不能被归类成 needs_action
+    const err: unknown = await runGrabToConfirm(async () => {
+      throw new UIElementNotFoundError("模拟：确认订单点击抛定位异常");
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UIElementNotFoundError);
+    // 消息含「确认订单」：确认异常来自确认订单阶段而非前置购买/票档阶段
+    expect((err as Error).message).toContain("确认订单");
+  });
+
+  it("tap 成功后截图失败 → 仍 submitted 不降级（重复下单 bug 修复）", async () => {
+    const result = await runGrabToConfirm(async () => {}, {
+      screenshotError: new Error("模拟：提交后截图失败"),
+    });
+
+    // 订单已提交：截图失败只损失该张调试截图，不得把结果降级为 failed
+    expect(result.status).toBe("submitted");
+    expect(result.error).toBeNull();
+    expect(result.order_url).toBe(DAMAI_ORDERS_URL);
+    expect(result.screenshots).toHaveLength(0);
+  });
+
+  it("选票档前置失败 → 仍 failed（请求未发出，语义不变）", async () => {
+    const buyButton = new UIElement({ tag: "node", text: "Buy", bounds: [0, 0, 10, 10] });
+    shellMock.mockImplementation(async (...args: unknown[]) => {
+      const argv = shellArgv(args);
+      if (argv[0] === "dumpsys" && argv[1] === "activity") {
+        return "… cn.damai …（前台）";
+      }
+      return "";
+    });
+    assertTextMock.mockResolvedValue(false);
+    waitForElementMock.mockResolvedValue(buyButton);
+    // dumpUi 无任何 ¥xxx 价格元素 → damai_select_price 抛 DamaiGrabFailedError
+    dumpUiMock.mockResolvedValue([
+      new UIElement({ tag: "node", text: "选座", bounds: [0, 0, 10, 10] }),
+    ]);
+    tapMock.mockResolvedValue(undefined);
+    screenshotMock.mockResolvedValue(Buffer.alloc(0));
+    waitMsMock.mockResolvedValue(undefined);
+    mkdirSyncMock.mockReturnValue(undefined);
+
+    const result = await damaiGrab("device", "item", 1, null, 1, "", {
+      confirmOrder: true,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.error ?? "").toContain("未找到任何 ¥xxx");
+    expect(result.order_url).toBeUndefined();
   });
 });

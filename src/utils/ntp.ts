@@ -10,7 +10,11 @@
  *   - UDP、5 秒超时——NTP 服务器在 1 个往返内即返回
  *   - 单臂（single-arm）查询——没有 Originate Timestamp 可回传，因此用
  *     `server_unix - midpoint(local_send, local_recv)` 近似 offset。
- *     该估计偏向半个往返时延，对局域网 NTP 而言可忽略。
+ *     该估计偏向半个往返时延，对局域网 NTP 而言可忽略。单臂下该公式退化为
+ *     `server - sent - rtt/2`（与 clock.rs 的写法等价），即已含 RTT/2 补偿。
+ *   - {@link querySampled} 在此之上做每源多次采样（默认 3 次）取最小 RTT
+ *     （最小 RTT 样本的上下行不对称差最小），并给出 uncertainty = rtt/2 +
+ *     分辨率的显式误差区间；{@link query} 保持单次交换行为不变。
  *   - MCP 侧 fire-and-forget——调用方可以不 await 地预热同步。
  */
 
@@ -121,19 +125,13 @@ function namedError(name: "TimeoutError" | "ConnectionError", message: string): 
 }
 
 /**
- * 查询 NTP 服务器并计算 offset。
- *
- * Python 原版是同步 socket 实现（`async_query` 用线程池包装它）；Node 的
- * dgram 天然异步，这里直接以异步实现承载同一协议语义，供测试与 CLI 快速
- * 模式使用。
+ * 单次 NTP 交换（模块内私有）：{@link query} 与 {@link querySampled} 共用的
+ * 最小单元——恰好一次 UDP 往返，socket 创建/关闭语义独立完整。
  *
  * @throws 超时（`TimeoutError`）、socket 错误（`ConnectionError`）或响应过短
  *   （`Error`）——错误名与 Python 内建异常对应，`str(err)` 形态一致。
  */
-export async function query(
-  server: string = DEFAULT_NTP_SERVER,
-  timeout: number = QUERY_TIMEOUT_SEC,
-): Promise<NtpResult> {
+async function queryOnce(server: string, timeout: number): Promise<NtpResult> {
   const sock: Socket = createSocket("udp4");
   // 持久的 error 监听：settle 之后到达的 socket 错误不能变成未捕获异常
   sock.on("error", () => {});
@@ -214,6 +212,24 @@ export async function query(
 }
 
 /**
+ * 查询 NTP 服务器并计算 offset。
+ *
+ * Python 原版是同步 socket 实现（`async_query` 用线程池包装它）；Node 的
+ * dgram 天然异步，这里直接以异步实现承载同一协议语义，供测试与 CLI 快速
+ * 模式使用。单次交换的实现挪入 {@link queryOnce}；本函数对外行为不变
+ * （恰好 1 次尝试、同样的错误名与文案、同样的日志）。
+ *
+ * @throws 超时（`TimeoutError`）、socket 错误（`ConnectionError`）或响应过短
+ *   （`Error`）——错误名与 Python 内建异常对应，`str(err)` 形态一致。
+ */
+export async function query(
+  server: string = DEFAULT_NTP_SERVER,
+  timeout: number = QUERY_TIMEOUT_SEC,
+): Promise<NtpResult> {
+  return queryOnce(server, timeout);
+}
+
+/**
  * {@link query} 的异步入口，保留与 Python 版相同的名字以维持 API 对等。
  *
  * Python 版用 `run_in_executor` 把阻塞查询挪出事件循环；Node 的 dgram 本身
@@ -224,6 +240,208 @@ export async function asyncQuery(
   timeout: number = QUERY_TIMEOUT_SEC,
 ): Promise<NtpResult> {
   return query(server, timeout);
+}
+
+// ------ 多次采样（借鉴 clock.rs：每源 3 次采样取最小 RTT + 显式误差区间）------
+
+/**
+ * 每个源的采样次数：3 次背靠背采样取最小 RTT（最小 RTT 样本的上下行
+ * 不对称差最小，offset 偏差随之最小）。
+ */
+export const NTP_SAMPLES = 3;
+
+/** 本地时钟分辨率（毫秒）：计入误差半宽，避免零 RTT 时区间塌缩为单点。 */
+export const NTP_RESOLUTION_MS = 1;
+
+/** 样本 offset 的合法域：|offset| ≤ 24h（借鉴 clock.rs 的同款门槛），超出视为无效样本。 */
+export const NTP_MAX_OFFSET_ABS_MS = 86_400_000;
+
+/**
+ * 服务器时间戳的最低可信值（Unix 秒，≈2020-09）：低于此值视为无效样本。
+ *
+ * 对应 clock.rs 的 `server > 1.6e12`（毫秒制）门槛换算到本模块的秒制时间轴。
+ */
+export const NTP_MIN_SERVER_UNIX = 1.6e9;
+
+/** {@link NtpSampleResult} 的构造参数。 */
+export interface NtpSampleResultInit {
+  /** 查询的 NTP 服务器。 */
+  server: string;
+  /** 最小 RTT 样本的偏移（毫秒）。单臂公式已含 RTT/2 补偿（见模块头注释）。 */
+  offsetMs: number;
+  /** 有效样本中的最小往返时延（毫秒）。 */
+  roundTripMs: number;
+  /** 误差半宽（毫秒）= roundTripMs / 2 + 分辨率。 */
+  uncertaintyMs: number;
+  /** 有效样本数（≥1；超时/socket 错误/无效样本不计入）。 */
+  samples: number;
+  /** 收到最优样本响应的时刻（Unix 秒）。 */
+  sampledAtUnix: number;
+}
+
+/**
+ * 多次采样后的 NTP 查询结果（借鉴 clock.rs 的采样语义）。
+ *
+ * 数学说明：单臂下标准 offset 公式退化为 `server − t1 − rtt/2`，与 clock.rs
+ * 的 `offset = server − sent − rtt/2` 等价，即已含 RTT/2 补偿；取最小 RTT
+ * 样本可最小化上下行不对称引入的偏差，且 `[offset − uncertainty,
+ * offset + uncertainty]`（uncertainty = rtt/2 + 分辨率）必覆盖真实偏差。
+ */
+export class NtpSampleResult {
+  /** 查询的 NTP 服务器。 */
+  readonly server: string;
+  /** 最小 RTT 样本的偏移（毫秒，已含 RTT/2 补偿）。 */
+  readonly offsetMs: number;
+  /** 有效样本中的最小往返时延（毫秒）。 */
+  readonly roundTripMs: number;
+  /** 误差半宽（毫秒）。 */
+  readonly uncertaintyMs: number;
+  /** 有效样本数（≥1）。 */
+  readonly samples: number;
+  /** 收到最优样本响应的时刻（Unix 秒）。 */
+  readonly sampledAtUnix: number;
+
+  constructor(init: NtpSampleResultInit) {
+    this.server = init.server;
+    this.offsetMs = init.offsetMs;
+    this.roundTripMs = init.roundTripMs;
+    this.uncertaintyMs = init.uncertaintyMs;
+    this.samples = init.samples;
+    this.sampledAtUnix = init.sampledAtUnix;
+  }
+
+  /** 误差区间下界（毫秒）：offsetMs − uncertaintyMs。 */
+  get intervalLoMs(): number {
+    return this.offsetMs - this.uncertaintyMs;
+  }
+
+  /** 误差区间上界（毫秒）：offsetMs + uncertaintyMs。 */
+  get intervalHiMs(): number {
+    return this.offsetMs + this.uncertaintyMs;
+  }
+
+  /** offset 在健康带内（< 500 ms）时为 true——与 {@link NtpResult.synced} 同一规则。 */
+  get synced(): boolean {
+    return Math.abs(this.offsetMs) < 500.0;
+  }
+
+  /**
+   * 序列化为普通对象。
+   *
+   * 键名为 snake_case（对外表面，与 {@link NtpResult.toDict} 同风格）。
+   */
+  toDict(): {
+    server: string;
+    offset_ms: number;
+    round_trip_ms: number;
+    uncertainty_ms: number;
+    interval_low_ms: number;
+    interval_high_ms: number;
+    samples: number;
+    sampled_at_unix: number;
+    synced: boolean;
+  } {
+    return {
+      server: this.server,
+      offset_ms: round2(this.offsetMs),
+      round_trip_ms: round2(this.roundTripMs),
+      uncertainty_ms: round2(this.uncertaintyMs),
+      interval_low_ms: round2(this.intervalLoMs),
+      interval_high_ms: round2(this.intervalHiMs),
+      samples: this.samples,
+      sampled_at_unix: this.sampledAtUnix,
+      synced: this.synced,
+    };
+  }
+}
+
+/** {@link querySampled} 的可选项。 */
+export interface NtpSampledOptions {
+  /** 采样次数，必须为正整数；默认 {@link NTP_SAMPLES}。 */
+  samples?: number;
+  /** 本地时钟分辨率（毫秒），计入误差半宽；默认 {@link NTP_RESOLUTION_MS}。 */
+  resolutionMs?: number;
+}
+
+/**
+ * 查询 NTP 服务器：顺序采样多次（默认 {@link NTP_SAMPLES} 次，背靠背、不强制
+ * 间隔，每次采样都是 {@link queryOnce} 的独立 socket），取最小 RTT 的有效
+ * 样本并给出显式误差区间。
+ *
+ * - 样本有效性门槛：`serverUnix > NTP_MIN_SERVER_UNIX` 且
+ *   `|offsetMs| ≤ NTP_MAX_OFFSET_ABS_MS`；无效样本丢弃并计入失败
+ *   （错误文案「NTP 样本无效: …」）；
+ * - 部分尝试失败时只要 ≥1 个有效样本即成功（{@link NtpSampleResult.samples}
+ *   如实记录有效数）；全部失败（含全部无效）则重抛**最后一个**错误，
+ *   保留 {@link query} 的既有错误形态（`TimeoutError`/`ConnectionError`
+ *   的 name 与文案）。
+ *
+ * @param timeout 单次采样的超时（秒）。
+ * @throws 超时（`TimeoutError`）、socket 错误（`ConnectionError`）、响应过短
+ *   （`Error`）或样本全部无效（`Error`，中文「NTP 样本无效」）；采样次数
+ *   非正整数时抛中文 `Error`。
+ */
+export async function querySampled(
+  server: string = DEFAULT_NTP_SERVER,
+  timeout: number = QUERY_TIMEOUT_SEC,
+  options: NtpSampledOptions = {},
+): Promise<NtpSampleResult> {
+  const requested = options.samples ?? NTP_SAMPLES;
+  if (!Number.isInteger(requested) || requested < 1) {
+    throw new Error(`NTP 采样次数必须为正整数: ${requested}`);
+  }
+  const resolutionMs = Math.max(0, options.resolutionMs ?? NTP_RESOLUTION_MS);
+
+  let best: NtpResult | null = null;
+  let validSamples = 0;
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < requested; attempt++) {
+    let sample: NtpResult;
+    try {
+      sample = await queryOnce(server, timeout);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      continue;
+    }
+    if (
+      sample.serverUnix <= NTP_MIN_SERVER_UNIX ||
+      Math.abs(sample.offsetMs) > NTP_MAX_OFFSET_ABS_MS
+    ) {
+      lastError = new Error(
+        `NTP 样本无效: server=${server} ` +
+          `server_unix=${sample.serverUnix.toFixed(3)} ` +
+          `offset=${sample.offsetMs.toFixed(2)}ms`,
+      );
+      logger.debug(lastError.message);
+      continue;
+    }
+    validSamples += 1;
+    if (best === null || sample.delayMs < best.delayMs) {
+      best = sample;
+    }
+  }
+
+  if (best === null) {
+    // 全部尝试失败：重抛最后一个错误（保留既有 TimeoutError/ConnectionError 形态）
+    throw lastError ?? new Error(`NTP 采样全部失败: server=${server}`);
+  }
+
+  const uncertaintyMs = best.delayMs / 2 + resolutionMs;
+  // 对应 Python 的 f"{offset_ms:+.2f}"（恒带符号）
+  const offsetText = `${best.offsetMs < 0 ? "-" : "+"}${Math.abs(best.offsetMs).toFixed(2)}`;
+  logger.info(
+    `[ntp] sampled server=${server} offset=${offsetText}ms rtt=${best.delayMs.toFixed(2)}ms ` +
+      `uncertainty=${uncertaintyMs.toFixed(2)}ms samples=${validSamples}/${requested}`,
+  );
+  return new NtpSampleResult({
+    server,
+    offsetMs: best.offsetMs,
+    roundTripMs: best.delayMs,
+    uncertaintyMs,
+    samples: validSamples,
+    sampledAtUnix: best.queriedAtUnix,
+  });
 }
 
 // ------ 设备时钟辅助 -------------------------------------------------------

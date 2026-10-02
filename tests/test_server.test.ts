@@ -10,6 +10,8 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { z } from "zod";
+
 import { VERSION } from "../src/index";
 import { mcp } from "../src/server";
 import type { RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -112,6 +114,47 @@ describe("mcp server 注册", () => {
     ]) {
       expect(required in tools, `Missing L4 tool: ${required}`).toBe(true);
     }
+  });
+
+  it("新工具 damai_monitor_availability 已注册（只读监控 + zod 边界校验）", () => {
+    const tools = registeredTools();
+    const tool = tools["damai_monitor_availability"];
+    expect(tool, "Missing tool: damai_monitor_availability").toBeTruthy();
+    // 只读硬约束（设计文档 §7.5）：description 首句必须声明绝不点击购买、绝不提交订单
+    const desc = tool?.description ?? "";
+    expect(desc.startsWith("只读监控大麦详情页余票状态：判定")).toBe(true);
+    expect(desc).toContain("绝不点击购买、绝不提交订单");
+    // zod 参数校验（§7.5）：默认值齐全，且 max_attempts 工具层默认为有限值
+    const schema = tool?.inputSchema as unknown as z.ZodObject<z.ZodRawShape>;
+    const parsed = schema.parse({ device_id: "emu", item_id: "123" });
+    expect(parsed.interval_ms).toBe(30000);
+    expect(parsed.max_attempts).toBe(720);
+    expect(parsed.max_consecutive_errors).toBe(5);
+    expect(parsed.open_page).toBe(true);
+    expect(parsed.deadline_unix_ms).toBeNull();
+    // 边界：轮询间隔必须 ≥5s；max_attempts 不得为负
+    expect(() =>
+      schema.parse({ device_id: "emu", item_id: "123", interval_ms: 4999 }),
+    ).toThrow();
+    expect(() =>
+      schema.parse({ device_id: "emu", item_id: "123", max_attempts: -1 }),
+    ).toThrow();
+  });
+
+  it("新工具 notify_send 已注册（只发消息 + 幂等语义说明）", () => {
+    const tools = registeredTools();
+    const tool = tools["notify_send"];
+    expect(tool, "Missing tool: notify_send").toBeTruthy();
+    // 幂等语义（设计文档 §7.6）：超时＝送达状态未知，不自动重发
+    const desc = tool?.description ?? "";
+    expect(desc).toContain("timeout_unknown");
+    expect(desc).toContain("不会自动重发");
+    // target/text 必填；origin 等凭证参数可选（缺省回落环境变量），timeout_ms 有默认
+    const schema = tool?.inputSchema as unknown as z.ZodObject<z.ZodRawShape>;
+    const parsed = schema.parse({ target: "user", text: "开票了" });
+    expect(parsed.timeout_ms).toBe(10000);
+    expect(parsed.origin).toBeUndefined();
+    expect(parsed.client_id).toBeUndefined();
   });
 
   it("导入干净（包版本号正确）", () => {

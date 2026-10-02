@@ -6,19 +6,26 @@
  * {@link FakeUdpSocket} 承担 `_FakeUDPSocket` 的角色。
  */
 import type { SocketType } from "node:dgram";
+import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_NTP_SERVER,
+  NTP_MAX_OFFSET_ABS_MS,
+  NTP_MIN_SERVER_UNIX,
+  NTP_RESOLUTION_MS,
+  NTP_SAMPLES,
   NTP_UNIX_DELTA,
   NtpResult,
+  NtpSampleResult,
   asyncQuery,
   buildRequest,
   ntpSecsToUnix,
   parseTransmitTs,
   query,
+  querySampled,
 } from "../src/utils/ntp";
-import { FakeUdpSocket, captureRejection, fakeNtpResponse } from "./helpers";
+import { FakeUdpSocket, captureRejection, fakeNtpResponse, type SentPacket } from "./helpers";
 
 const dgramMocks = vi.hoisted(() => ({
   /** 当前用例注入的 createSocket 实现；null 时透传真实实现。 */
@@ -167,4 +174,323 @@ describe("async_query", () => {
 
 it("test_default_ntp_server_present", () => {
   expect(DEFAULT_NTP_SERVER).toBe("pool.ntp.org");
+});
+
+// ---- querySampled（多次采样：最小 RTT + 显式误差区间）-----------------------
+
+/** 单个采样 socket 的脚本：`delayMs = Infinity` 表示永不回包。 */
+interface SampleScript {
+  /** 回包延迟（假时钟毫秒）。 */
+  delayMs: number;
+  /** 服务器时钟相对本机时钟的真实偏差（秒），恒定。 */
+  serverOffsetSec?: number;
+}
+
+/**
+ * 可控制回包延迟的假 UDP socket（helpers 的 {@link FakeUdpSocket} 回包不可控
+ * 延迟，故在本测试文件内定义）。
+ *
+ * 响应不在构造时给定，而是在**回包触发时刻**按 `Date.now()/1000 +
+ * serverOffsetSec` 生成 Transmit Timestamp——服务器时钟随（假）时钟推进且
+ * 带固定真实偏差，使「误差区间覆盖真实偏差」的不变量可被精确断言。
+ */
+class DelayedFakeUdpSocket extends EventEmitter {
+  readonly sent: SentPacket[] = [];
+
+  constructor(
+    private readonly delayMs: number,
+    private readonly serverOffsetSec: number,
+  ) {
+    super();
+  }
+
+  send(data: Buffer, port: number, address: string, cb?: (err: Error | null) => void): this {
+    this.sent.push({ data, port, address });
+    if (Number.isFinite(this.delayMs)) {
+      setTimeout(() => {
+        const serverUnix = Date.now() / 1000 + this.serverOffsetSec;
+        const ntpSecs = serverUnix + NTP_UNIX_DELTA;
+        const secs = Math.floor(ntpSecs);
+        // 防御浮点上界：frac 必须落在 uint32 内
+        const frac = Math.min(2 ** 32 - 1, Math.round((ntpSecs - secs) * 2 ** 32));
+        this.emit("message", fakeNtpResponse(secs, frac));
+      }, this.delayMs);
+    }
+    if (cb) {
+      cb(null);
+    }
+    return this;
+  }
+
+  close(): this {
+    return this;
+  }
+}
+
+/**
+ * 按次序为每次 createSocket 发放脚本化 socket（querySampled 每次采样建一个
+ * 独立 socket）；`created` 旁路收集全部实例供断言。
+ */
+function scriptedSockets(
+  script: readonly SampleScript[],
+  created: DelayedFakeUdpSocket[] = [],
+): (type: SocketType) => DelayedFakeUdpSocket {
+  let index = 0;
+  return (_type: SocketType) => {
+    const spec = script[Math.min(index, script.length - 1)];
+    index += 1;
+    const sock = new DelayedFakeUdpSocket(spec.delayMs, spec.serverOffsetSec ?? 0);
+    created.push(sock);
+    return sock;
+  };
+}
+
+describe("NTP 采样常量", () => {
+  it("test_ntp_sampling_constants", () => {
+    expect(NTP_SAMPLES).toBe(3);
+    expect(NTP_RESOLUTION_MS).toBe(1);
+    expect(NTP_MAX_OFFSET_ABS_MS).toBe(86_400_000);
+    expect(NTP_MIN_SERVER_UNIX).toBe(1.6e9);
+  });
+});
+
+describe("NtpSampleResult", () => {
+  it("test_ntp_sample_result_to_dict_keys", () => {
+    const r = new NtpSampleResult({
+      server: "pool.ntp.org",
+      offsetMs: 12.5,
+      roundTripMs: 80.25,
+      uncertaintyMs: 41.13,
+      samples: 3,
+      sampledAtUnix: 1_700_000_000,
+    });
+    const d = r.toDict();
+    // 键名逐项断言：snake_case 对外表面
+    expect(Object.keys(d)).toEqual([
+      "server",
+      "offset_ms",
+      "round_trip_ms",
+      "uncertainty_ms",
+      "interval_low_ms",
+      "interval_high_ms",
+      "samples",
+      "sampled_at_unix",
+      "synced",
+    ]);
+    expect(d.server).toBe("pool.ntp.org");
+    expect(d.offset_ms).toBe(12.5);
+    expect(d.round_trip_ms).toBe(80.25);
+    expect(d.uncertainty_ms).toBe(41.13);
+    expect(d.interval_low_ms).toBeCloseTo(-28.63, 10);
+    expect(d.interval_high_ms).toBeCloseTo(53.63, 10);
+    expect(d.samples).toBe(3);
+    expect(d.sampled_at_unix).toBe(1_700_000_000);
+    expect(d.synced).toBe(true);
+
+    // getter：区间由 offset ± uncertainty 推出
+    expect(r.intervalLoMs).toBeCloseTo(-28.63, 10);
+    expect(r.intervalHiMs).toBeCloseTo(53.63, 10);
+  });
+
+  it.each([
+    [499.9, true],
+    [500, false],
+    [-501, false],
+  ] as const)("test_ntp_sample_result_synced (offsetMs=%s)", (offsetMs, expectedSynced) => {
+    const r = new NtpSampleResult({
+      server: "x",
+      offsetMs,
+      roundTripMs: 0,
+      uncertaintyMs: 1,
+      samples: 1,
+      sampledAtUnix: 0,
+    });
+    expect(r.synced).toBe(expectedSynced);
+  });
+});
+
+describe("querySampled（假定时器，逐样本可推）", () => {
+  it("test_query_sampled_picks_min_rtt_and_covers_true_offset", async () => {
+    // 全量假定时器让 Date 随假时钟推进：3 次采样回包延迟 30/5/15ms，服务器
+    // 时钟恒超前真实偏差 250ms。逐样本可推：rtt=30/5/15ms 的样本 offset 分别
+    // 为 250+15 / 250+2.5 / 250+7.5 ms——最快样本（5ms）胜出，其
+    // [offset − rtt/2 − 1, offset + rtt/2 + 1] 覆盖真实偏差 250ms。
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_700_000_000_000);
+      const created: DelayedFakeUdpSocket[] = [];
+      dgramMocks.createSocketImpl = scriptedSockets(
+        [
+          { delayMs: 30, serverOffsetSec: 0.25 },
+          { delayMs: 5, serverOffsetSec: 0.25 },
+          { delayMs: 15, serverOffsetSec: 0.25 },
+        ],
+        created,
+      );
+
+      const pending = querySampled("pool.ntp.org", 1.0);
+      await vi.advanceTimersByTimeAsync(60);
+      const out = await pending;
+
+      expect(out).toBeInstanceOf(NtpSampleResult);
+      expect(out.server).toBe("pool.ntp.org");
+      expect(out.samples).toBe(3); // 默认采样次数 NTP_SAMPLES
+      // 每次采样是独立 socket，各发 1 个 48 字节请求到 server:123
+      expect(created).toHaveLength(3);
+      for (const sock of created) {
+        expect(sock.sent).toHaveLength(1);
+        expect(sock.sent[0].data).toHaveLength(48);
+        expect(sock.sent[0].port).toBe(123);
+        expect(sock.sent[0].address).toBe("pool.ntp.org");
+      }
+      expect(out.roundTripMs).toBeCloseTo(5, 2); // 命中最快样本
+      expect(out.offsetMs).toBeCloseTo(252.5, 2); // 来自最快样本（其余样本为 265 / 257.5）
+      expect(out.uncertaintyMs).toBeCloseTo(3.5, 2); // rtt/2 + NTP_RESOLUTION_MS
+      expect(out.intervalLoMs).toBeLessThanOrEqual(250);
+      expect(out.intervalHiMs).toBeGreaterThanOrEqual(250);
+      expect(out.synced).toBe(true);
+      // 收到最优样本响应的时刻 = 假时钟 35ms
+      expect(out.sampledAtUnix).toBeCloseTo(1_700_000_000.035, 5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("test_query_sampled_tolerates_first_timeout", async () => {
+    // 第 1 次采样永不回包（0.2s 超时），后两次正常 → 仍成功且 samples=2
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_700_000_000_000);
+      dgramMocks.createSocketImpl = scriptedSockets([
+        { delayMs: Number.POSITIVE_INFINITY },
+        { delayMs: 5 },
+        { delayMs: 5 },
+      ]);
+
+      const pending = querySampled("pool.ntp.org", 0.2);
+      await vi.advanceTimersByTimeAsync(400);
+      const out = await pending;
+
+      expect(out.samples).toBe(2);
+      expect(out.roundTripMs).toBeCloseTo(5, 2);
+      // 最快样本 rtt=5ms、服务器偏差 0：offset = 0 + 5/2 = 2.5ms
+      expect(out.offsetMs).toBeCloseTo(2.5, 2);
+      expect(out.synced).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("test_query_sampled_all_timeout_reraises_timeout_error", async () => {
+    // 三次全部超时 → 重抛最后一个错误，保留既有 TimeoutError 形态
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_700_000_000_000);
+      dgramMocks.createSocketImpl = scriptedSockets([
+        { delayMs: Number.POSITIVE_INFINITY },
+        { delayMs: Number.POSITIVE_INFINITY },
+        { delayMs: Number.POSITIVE_INFINITY },
+      ]);
+
+      const pending = captureRejection(querySampled("pool.ntp.org", 0.1));
+      await vi.advanceTimersByTimeAsync(400);
+      const err = (await pending) as Error;
+
+      expect(err).toBeInstanceOf(Error);
+      expect(err.name).toBe("TimeoutError");
+      expect(err.message).toMatch(/'pool\.ntp\.org' did not respond/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("test_query_sampled_honors_samples_and_resolution_options", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_700_000_000_000);
+      dgramMocks.createSocketImpl = scriptedSockets([{ delayMs: 5 }]);
+
+      const pending = querySampled("pool.ntp.org", 1.0, { samples: 1, resolutionMs: 10 });
+      await vi.advanceTimersByTimeAsync(20);
+      const out = await pending;
+
+      expect(out.samples).toBe(1);
+      expect(out.roundTripMs).toBeCloseTo(5, 2);
+      expect(out.uncertaintyMs).toBeCloseTo(12.5, 2); // 5/2 + 自定义分辨率 10
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("querySampled（样本有效性门槛）", () => {
+  it("test_query_sampled_drops_stale_server_unix_samples", async () => {
+    // 冻结 Date 在 2000 年：offset=0 落在合法域内，但
+    // serverUnix=946684800 < NTP_MIN_SERVER_UNIX → 仅触发「时间过旧」门槛，
+    // 三次全部无效 → reject 中文「NTP 样本无效」。
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(946_684_800_000);
+      dgramMocks.createSocketImpl = scriptedSockets([
+        { delayMs: 0 },
+        { delayMs: 0 },
+        { delayMs: 0 },
+      ]);
+
+      const err = (await captureRejection(querySampled("pool.ntp.org", 1.0))) as Error;
+
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toMatch(/NTP 样本无效/);
+      expect(err.message).toContain("946684800.000");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("test_query_sampled_drops_offset_beyond_24h", async () => {
+    // 冻结 Date 在 2023 年，服务器时钟超前 25h：serverUnix 合法但
+    // |offset| = 90_000_000ms > NTP_MAX_OFFSET_ABS_MS → 三次全部丢弃。
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(1_700_000_000_000);
+      dgramMocks.createSocketImpl = scriptedSockets([
+        { delayMs: 0, serverOffsetSec: 86_400 + 3_600 },
+        { delayMs: 0, serverOffsetSec: 86_400 + 3_600 },
+        { delayMs: 0, serverOffsetSec: 86_400 + 3_600 },
+      ]);
+
+      const err = (await captureRejection(querySampled("pool.ntp.org", 1.0))) as Error;
+
+      expect(err.message).toMatch(/NTP 样本无效/);
+      expect(err.message).toContain("90000000.00ms");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("test_query_sampled_keeps_valid_samples_after_invalid_one", async () => {
+    // 第 1 个样本 serverUnix ≈ 7e8 被丢弃，后两个有效 → 成功且 samples=2。
+    // 冻结 Date 下 t1==t4（rtt=0），有效样本 offset=0、uncertainty=0/2+1=1。
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(1_700_000_000_000);
+      dgramMocks.createSocketImpl = scriptedSockets([
+        { delayMs: 0, serverOffsetSec: -1_000_000_000 },
+        { delayMs: 0 },
+        { delayMs: 0 },
+      ]);
+
+      const out = await querySampled("pool.ntp.org", 1.0);
+
+      expect(out.samples).toBe(2);
+      expect(out.roundTripMs).toBe(0);
+      expect(out.offsetMs).toBe(0);
+      expect(out.uncertaintyMs).toBe(1);
+      expect(out.intervalLoMs).toBe(-1);
+      expect(out.intervalHiMs).toBe(1);
+      expect(out.synced).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

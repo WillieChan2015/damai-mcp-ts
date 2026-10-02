@@ -23,6 +23,8 @@
 | 🧠 **大麦专属** | `damaiGrab()` 一行调用完成"等开票 → 抢档 → 选人 → 提交" |
 | 📸 **自动截图归档** | 失败时自动存 `damai_shots/` 便于复盘 |
 | ⏱️ **毫秒级等待** | 内部用 `setTimeout` 高精度 sleep + 末段忙等，不浪费开票瞬间 |
+| 🛰️ **只读余票监控** | `damai_monitor_availability` 轮询详情页判定 available / not_on_sale / sold_out / unknown，绝不点击购买、绝不提交订单 |
+| 📣 **微信开票通知** | `notify_send` 经 ClawBot 机器人发送文本提醒；超时＝送达状态未知（timeout_unknown），绝不自动重发 |
 
 ---
 

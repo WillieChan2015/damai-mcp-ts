@@ -8,7 +8,7 @@
  *     0. 连接检查         （设备 + adb 可用）
  *     1. app 启动 + 登录校验（必要时人工重登）
  *     2. 详情页预热       （提前打开 URL，利用缓存状态）
- *     3. 倒计时循环       （每分钟更新一次状态）
+ *     3. 倒计时循环       （每分钟更新一次状态；到点前经去抖门判定开票）
  *     4. 开票触发         （T-0 触发抢票流水线）
  *     5. 结果 + 可选提醒
  *
@@ -16,10 +16,11 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { screenshot } from "../actions/actions";
+import { screenshot, swipe } from "../actions/actions";
 import { formatPyFloat } from "../device/adb";
 import { DeviceManager } from "../device/manager";
 import { dumpUi } from "../inspector/dump";
+import type { UIElement } from "../inspector/models";
 import { logger } from "../utils/logging";
 import { asyncQuery } from "../utils/ntp";
 
@@ -352,6 +353,410 @@ export async function countdownLoop(
   }
 }
 
+// ---- 开票判定去抖门 -------------------------------------------------------------
+//
+// 语义移植自 damai 的 CountdownSignalGate 与 wait_for_sale_fast：
+// 倒计时节点消失（= 页面已切到可购买态）必须**连续确认 N 次**才算开票（去抖门）；
+// 下拉刷新会临时卸载倒计时节点，那段缺失永不计入（刷新后门 disarm，等节点重现
+// 再重新武装）；定时器兜底最高优先级——到点必触发，不等再一次 UI 探测。
+
+/** 大麦详情页倒计时节点的 resource-id（{@link CountdownSignalGate} 的观察对象）。 */
+export const COUNTDOWN_NODE_RESOURCE_ID = "cn.damai:id/id_project_count_down_layout";
+
+/** 基线要求：进入观察窗后连续见到倒计时节点的最少次数，见齐才武装门。 */
+export const GATE_BASELINE_COUNT = 3;
+
+/** 基线尝试窗口上限（毫秒）；实际窗口为 min(本值, 距开票)。 */
+export const GATE_BASELINE_WINDOW_MS = 3000;
+
+/** 定时器兜底提前量（毫秒）：now ≥ target + 本值即无条件判开票。 */
+export const GATE_FALLBACK_AFTER_MS = 150;
+
+/** {@link waitForSaleStart} 主循环默认轮询间隔（毫秒）。 */
+export const GATE_DEFAULT_POLL_MS = 500;
+
+/**
+ * 开票判定去抖门（纯状态机，无 I/O，可直接单测）。
+ *
+ * 状态转移逐条对齐 damai `wait_for_sale_fast` 的信号门：
+ * - {@link CountdownSignalGate.observe}(true)：未武装则 re-arm（rearmCount+1）
+ *   并清零缺失计数；已武装则仅维持武装态。
+ * - {@link CountdownSignalGate.observe}(false)：未武装或未到点
+ *   （signalAllowed=false）时一律忽略；武装且到点才记缺失——首次缺失记
+ *   {@link CountdownSignalGate.missingStartedAtMs}，连续缺失达到 confirmCount
+ *   才确认开票（返回 true）。
+ * - {@link CountdownSignalGate.disarm}：刷新后必调——刷新造成的节点缺失
+ *   永不计入，须等节点重现再重新武装。
+ */
+export class CountdownSignalGate {
+  /** 连续缺失确认次数（构造时 clamp 到 1..5，默认 2）。 */
+  private readonly confirmCount: number;
+  private armedFlag = false;
+  private falseStreakCount = 0;
+  private rearmCounter = 0;
+  private missingStartedAt: number | null = null;
+
+  constructor(options?: { confirmCount?: number }) {
+    const raw = options?.confirmCount ?? 2;
+    // clamp 到 1..5：越界不抛错，取最近的合法值
+    this.confirmCount = Math.min(5, Math.max(1, Math.trunc(raw)));
+  }
+
+  /** 门当前是否武装（武装后「到点 + 节点缺失」才开始计数）。 */
+  get armed(): boolean {
+    return this.armedFlag;
+  }
+
+  /** 当前连续缺失次数；disarm 或节点重现时清零。 */
+  get falseStreak(): number {
+    return this.falseStreakCount;
+  }
+
+  /**
+   * 门完成「未武装 → 武装」转移的累计次数（已武装状态下的 observe(true) 不计）。
+   * 跨整个等待周期累计，不随 disarm 清零——用于诊断页面抖动 / 刷新频率。
+   */
+  get rearmCount(): number {
+    return this.rearmCounter;
+  }
+
+  /** 首次「武装 + 到点」缺失的时刻（Unix 毫秒）；无进行中的缺失时为 null。 */
+  get missingStartedAtMs(): number | null {
+    return this.missingStartedAt;
+  }
+
+  /**
+   * 解除武装并清零缺失计数（下拉刷新后必调——刷新造成的缺失永不计入）。
+   *
+   * @param _nowMs 解除时刻（Unix 毫秒）。当前状态机不使用该值，仅为对齐
+   *               damai 原版签名保留。
+   */
+  disarm(_nowMs?: number): void {
+    this.armedFlag = false;
+    this.falseStreakCount = 0;
+    this.missingStartedAt = null;
+  }
+
+  /**
+   * 观察一次倒计时节点状态。
+   *
+   * @param present 节点是否在场（可见）。
+   * @param nowMs 本次观察时刻（Unix 毫秒）。
+   * @param signalAllowed 是否已到点（nowMs ≥ 开票时刻）；到点后的缺失才计数。
+   * @returns true = 确认开票（连续缺失已达 confirmCount）。
+   */
+  observe(present: boolean, nowMs: number, signalAllowed: boolean): boolean {
+    if (present) {
+      if (!this.armedFlag) {
+        // re-arm：节点重现（或首次见到）→ 重新武装
+        this.armedFlag = true;
+        this.rearmCounter += 1;
+      }
+      this.falseStreakCount = 0;
+      this.missingStartedAt = null;
+      return false;
+    }
+    if (!this.armedFlag || !signalAllowed) {
+      // 未武装 / 未到点的缺失一律忽略（页面变体、刷新卸载、开票前正常在售态）
+      return false;
+    }
+    if (this.missingStartedAt === null) {
+      this.missingStartedAt = nowMs;
+    }
+    this.falseStreakCount += 1;
+    return this.falseStreakCount >= this.confirmCount;
+  }
+}
+
+/** {@link waitForSaleStart} 的关键字参数。 */
+export interface WaitForSaleStartOptions {
+  /**
+   * 观察窗起点（Unix 秒），默认 targetUnix - 10。早于它的时段视为候场，
+   * 复用 {@link countdownLoop} 以 60s 粗粒度 tick 等待。
+   */
+  observeFromUnix?: number;
+  /** 主循环轮询间隔（毫秒）。默认 500。 */
+  gatePollMs?: number;
+  /** 连续缺失确认次数（clamp 到 1..5）。默认 2。 */
+  confirmCount?: number;
+  /** 定时器兜底提前量（毫秒）。默认 150。 */
+  fallbackAfterMs?: number;
+  /** 是否启用下拉刷新（刷新后门 disarm 并进入冷却）。默认 true。 */
+  refreshEnabled?: boolean;
+  /** 两次刷新的最小间隔（毫秒）。默认 10000。 */
+  refreshIntervalMs?: number;
+  /** 距开票小于该秒数后不再刷新。默认 2。 */
+  refreshStopAtSec?: number;
+  /** 刷新后的冷却毫秒数（等页面重新渲染完成）。默认 250。 */
+  refreshSettleMs?: number;
+  /** 进度回调 (secondsLeft, elapsedS)；异常吞掉。 */
+  progressCb?: ProgressCallback | null;
+  /** 外部停止事件；置位后立即返回（trigger:"timer"）。 */
+  stopEvent?: StopEvent | null;
+}
+
+/** {@link waitForSaleStart} 的返回结构。 */
+export interface WaitSaleStartResult {
+  /** 触发方式："gate" = 门确认开票；"timer" = 定时器兜底（含外部取消）。 */
+  trigger: "gate" | "timer";
+  /** 基线是否建成；未建成时门不武装，全程靠定时器兜底。 */
+  baselineEstablished: boolean;
+  /** 返回那一刻门是否处于武装态。 */
+  armedAtTrigger: boolean;
+  /** 门累计 re-arm 次数（含基线武装本身）。 */
+  rearmCount: number;
+  /** 从首次确认缺失到返回经过的毫秒数；无缺失记录时为 null。 */
+  missingMs: number | null;
+  /** UI 观察是否被禁用（dump 连续失败 ≥ 3 次，退化为纯定时器）。 */
+  uiDisabled: boolean;
+  /** 执行过的下拉刷新次数。 */
+  refreshes: number;
+  /** 本函数总耗时（毫秒，含候场段）。 */
+  elapsedMs: number;
+}
+
+/**
+ * 判断 uiautomator dump 中是否存在可见的倒计时节点。
+ *
+ * resource-id 等值或后缀匹配（语义同 `inspector/find.ts` 的 rid 规则），
+ * 且要求元素可见（enabled 且 bounds 非空）。
+ */
+function findCountdownNode(elements: readonly UIElement[]): boolean {
+  return elements.some(
+    (el) =>
+      el.visible &&
+      (el.resourceId === COUNTDOWN_NODE_RESOURCE_ID ||
+        el.resourceId.endsWith(COUNTDOWN_NODE_RESOURCE_ID)),
+  );
+}
+
+/**
+ * 解析 "WxH" 形态的屏幕尺寸（取自 {@link DeviceManager} 的设备快照）；
+ * 空 / 解析失败 / 查询失败时回退 1080x1920 并 logger.warning。
+ */
+async function resolveScreenSize(deviceId: string): Promise<{ w: number; h: number }> {
+  try {
+    const info = await DeviceManager.shared().require(deviceId);
+    const m = /^(\d+)x(\d+)$/.exec(info.screenSize);
+    if (m !== null) {
+      return { w: Number(m[1]), h: Number(m[2]) };
+    }
+    logger.warning(
+      `[checklist] 无法解析屏幕尺寸 '${info.screenSize}'，刷新手势回退 1080x1920`,
+    );
+  } catch (exc) {
+    logger.warning(`[checklist] 获取屏幕尺寸失败，刷新手势回退 1080x1920: ${excToStr(exc)}`);
+  }
+  return { w: 1080, h: 1920 };
+}
+
+/**
+ * 等待开票：候场 → 建基线 → 门观察主循环，返回开票判定方式。
+ *
+ * 主循环每迭代固定顺序：
+ * ① stopEvent；② 定时器最高优先级（now ≥ target + fallbackAfterMs →
+ * trigger:"timer"，到点必触发，不等再一次 UI 探测）；③ dump UI 找倒计时节点
+ * （dump 抛异常 ≠ 节点缺失，不喂门，连错 3 次 → uiDisabled 退化为纯定时器）；
+ * ④ dump 返回后复查 deadline（IPC 可能跨越定时器 deadline，定时器仍然获胜）；
+ * ⑤ gate.observe（到点后连续 confirmCount 次缺失 → trigger:"gate"）；
+ * ⑥ 下拉刷新窗口（刷新后 disarm + 冷却）；⑦ 睡 gatePollMs + 进度上报。
+ *
+ * 基线先建立：进入观察窗后先以 min(3s, 距开票) 为窗口、gatePollMs 为步长，
+ * 要求节点连续 {@link GATE_BASELINE_COUNT} 次在场才武装门；窗口内未建成基线
+ * 则降级为纯定时器兜底（deviation：damai 原版在此抛 RuntimeError——checklist
+ * 是编排层，不能因 UI 变体让整场抢票中断）。
+ *
+ * @returns {@link WaitSaleStartResult}
+ */
+export async function waitForSaleStart(
+  deviceId: string,
+  targetUnix: number,
+  {
+    observeFromUnix = targetUnix - 10,
+    gatePollMs = GATE_DEFAULT_POLL_MS,
+    confirmCount = 2,
+    fallbackAfterMs = GATE_FALLBACK_AFTER_MS,
+    refreshEnabled = true,
+    refreshIntervalMs = 10000,
+    refreshStopAtSec = 2,
+    refreshSettleMs = 250,
+    progressCb = null,
+    stopEvent = null,
+  }: WaitForSaleStartOptions = {},
+): Promise<WaitSaleStartResult> {
+  const startedMs = nowMs();
+  const targetMs = targetUnix * 1000;
+  const gate = new CountdownSignalGate({ confirmCount });
+
+  let baselineEstablished = false;
+  let uiDisabled = false;
+  let refreshes = 0;
+  let consecutiveDumpErrors = 0;
+
+  /** 统一出口：汇总门状态与计时。 */
+  const finish = (trigger: "gate" | "timer"): WaitSaleStartResult => {
+    const now = nowMs();
+    return {
+      trigger,
+      baselineEstablished,
+      armedAtTrigger: gate.armed,
+      rearmCount: gate.rearmCount,
+      missingMs:
+        gate.missingStartedAtMs === null
+          ? null
+          : Math.max(0, now - gate.missingStartedAtMs),
+      uiDisabled,
+      refreshes,
+      elapsedMs: now - startedMs,
+    };
+  };
+
+  /** 带容错的进度上报（等价 countdownLoop 的容错语义）。 */
+  const reportProgress = async (): Promise<void> => {
+    if (progressCb === null) {
+      return;
+    }
+    try {
+      await progressCb(targetUnix - nowSec(), (nowMs() - startedMs) / 1000);
+    } catch (exc) {
+      logger.error(`countdown callback raised, continuing: ${excToStr(exc)}`);
+    }
+  };
+
+  // ---- 候场段：距观察窗开始还有一段时间 → 复用 60s 粗粒度 tick（语义不变）----
+  if (nowSec() < observeFromUnix) {
+    await countdownLoop(observeFromUnix, { progressCb, stopEvent });
+  }
+
+  // ---- 基线段：min(3s, 距开票) 窗口内连续 3 次见到节点才武装门 ----
+  // 没有这个转换，错误或半渲染的页面看起来就像已开售。
+  const baselineDeadlineMs = Math.min(nowMs() + GATE_BASELINE_WINDOW_MS, targetMs);
+  let baselineStreak = 0;
+  while (!baselineEstablished && !uiDisabled && nowMs() < baselineDeadlineMs) {
+    if (stopEvent !== null && stopEvent.isSet()) {
+      gate.disarm();
+      return finish("timer");
+    }
+    let present: boolean;
+    try {
+      present = findCountdownNode(await dumpUi(deviceId));
+      consecutiveDumpErrors = 0;
+    } catch (exc) {
+      // dump 抛异常 ≠ 节点缺失：不喂门；连错 3 次禁用 UI 观察
+      consecutiveDumpErrors += 1;
+      if (consecutiveDumpErrors >= 3) {
+        uiDisabled = true;
+        logger.warning(
+          `[checklist] UI dump 连续失败 ${consecutiveDumpErrors} 次，` +
+            `开票判定退化为纯定时器: ${excToStr(exc)}`,
+        );
+        gate.disarm();
+        break;
+      }
+      await sleep(gatePollMs);
+      continue;
+    }
+    if (present) {
+      baselineStreak += 1;
+      if (baselineStreak >= GATE_BASELINE_COUNT) {
+        baselineEstablished = true;
+        // 用状态机自身的 re-arm 语义武装门（首次 observe(true) 即 armed；
+        // 基线未建成时门保持未武装，rearmCount 如实报告 0）
+        gate.observe(true, nowMs(), nowMs() >= targetMs);
+        break;
+      }
+    } else {
+      // 基线要求「连续」在场：缺失即归零重来
+      baselineStreak = 0;
+    }
+    await reportProgress();
+    await sleep(gatePollMs);
+  }
+  if (!baselineEstablished) {
+    // 门未武装：绝不让未经验证的缺失计数进入确认逻辑（纯定时器兜底）
+    gate.disarm();
+  }
+
+  // 屏幕尺寸只解析一次（刷新手势用）
+  const screenSize = refreshEnabled
+    ? await resolveScreenSize(deviceId)
+    : { w: 1080, h: 1920 };
+  let lastRefreshMs = startedMs;
+  let cooldownUntilMs = 0;
+
+  // ---- 主循环 ----
+  for (;;) {
+    // ① 外部取消（与 countdownLoop 的取消语义一致，返回 trigger:"timer"）
+    if (stopEvent !== null && stopEvent.isSet()) {
+      return finish("timer");
+    }
+    // ② 定时器最高优先级：到点必触发，不等再一次 UI 探测
+    const now = nowMs();
+    if (now >= targetMs + fallbackAfterMs) {
+      return finish("timer");
+    }
+    // ③ dump UI 找倒计时节点；基线未建成（门不武装）或 UI 已禁用时
+    //    退化为纯定时器等待，不再做任何 UI 观察
+    let present: boolean | null = null;
+    if (baselineEstablished && !uiDisabled) {
+      try {
+        present = findCountdownNode(await dumpUi(deviceId));
+        consecutiveDumpErrors = 0;
+      } catch (exc) {
+        consecutiveDumpErrors += 1;
+        if (consecutiveDumpErrors >= 3) {
+          uiDisabled = true;
+          logger.warning(
+            `[checklist] UI dump 连续失败 ${consecutiveDumpErrors} 次，` +
+              `开票判定退化为纯定时器: ${excToStr(exc)}`,
+          );
+        }
+      }
+    }
+    // ④ dump 返回后复查 deadline：IPC 可能跨越定时器 deadline，定时器仍然获胜
+    if (present !== null && nowMs() >= targetMs + fallbackAfterMs) {
+      return finish("timer");
+    }
+    // ⑤ 门观察：到点/过点后的节点缺失才计数；连续 confirmCount 次 → 确认开票
+    if (present !== null) {
+      const confirmed = gate.observe(present, nowMs(), nowMs() >= targetMs);
+      if (confirmed) {
+        return finish("gate");
+      }
+    }
+    // ⑥ 下拉刷新窗口：距上次刷新 ≥ refreshIntervalMs、距开票 > refreshStopAtSec
+    //    且不在冷却期；刷新会临时卸载倒计时节点 → disarm 后等节点重现再武装
+    if (
+      refreshEnabled &&
+      !uiDisabled &&
+      nowMs() - lastRefreshMs >= refreshIntervalMs &&
+      nowSec() < targetUnix - refreshStopAtSec &&
+      nowMs() >= cooldownUntilMs
+    ) {
+      try {
+        await swipe(
+          deviceId,
+          screenSize.w / 2,
+          screenSize.h * 0.25,
+          screenSize.w / 2,
+          screenSize.h * 0.65,
+          { durationMs: 300 },
+        );
+      } catch (exc) {
+        // 刷新手势失败不影响判定主流程
+        logger.warning(`[checklist] 刷新手势失败（忽略）: ${excToStr(exc)}`);
+      }
+      gate.disarm();
+      lastRefreshMs = nowMs();
+      cooldownUntilMs = nowMs() + refreshSettleMs;
+      refreshes += 1;
+    }
+    // ⑦ 睡一个轮询间隔 + 进度上报
+    await sleep(gatePollMs);
+    await reportProgress();
+  }
+}
+
 // ---- 编排 ---------------------------------------------------------------------
 
 /** {@link runChecklist} 的关键字参数（对应 Python 版 keyword-only 参数）。 */
@@ -374,6 +779,19 @@ export interface RunChecklistOptions {
   onPhase?: ((phase: string) => void | Promise<void>) | null;
   /** 每个倒计时 tick 触发的异步回调，参数为 (seconds_left, elapsed_s)。 */
   onProgress?: ProgressCallback | null;
+  /**
+   * 是否禁用开票判定去抖门；true 时 Phase 3 回退为纯 {@link countdownLoop}
+   * 候场（旧行为）。默认 false。
+   */
+  signalGateDisabled?: boolean;
+  /**
+   * 透传给 {@link waitForSaleStart} 的门参数；observeFromUnix / progressCb /
+   * stopEvent 由 checklist 自己决定（observeFromUnix 恒为 fireAt），不接受覆盖。
+   */
+  signalGateOptions?: Omit<
+    WaitForSaleStartOptions,
+    "progressCb" | "stopEvent" | "observeFromUnix"
+  > | null;
 }
 
 /**
@@ -395,6 +813,8 @@ export async function runChecklist(
     ntpTimeoutSec = 5.0,
     onPhase = null,
     onProgress = null,
+    signalGateDisabled = false,
+    signalGateOptions = null,
   }: RunChecklistOptions = {},
 ): Promise<ChecklistResult> {
   const result = new ChecklistResult({ status: "preheat_open_time" });
@@ -488,7 +908,24 @@ export async function runChecklist(
     const fireAt = targetUnix - preheatSeconds;
     // Python 版在此捕获 asyncio.CancelledError 后补记 _end 再重抛；JS 侧的
     // sleep 未接 AbortSignal、正常路径不会中途抛出，故省略该分支。
-    await countdownLoop(fireAt, { progressCb: onProgress });
+    if (signalGateDisabled) {
+      // 逃生通道：禁用去抖门时保持旧行为（纯候场到 fireAt）
+      await countdownLoop(fireAt, { progressCb: onProgress });
+    } else {
+      // 开票判定去抖门：候场段复用 countdownLoop（observeFromUnix=fireAt，
+      // 行为逐字不变），到点前后用「连续 N 次节点消失 + 定时器兜底」判定开票。
+      // Phase 4 仍透传 openTime——damaiGrab 自带的开票时间闸门不被绕过，
+      // 门提前确认时 waitUntil 立即返回，两层语义自动对齐。
+      const waitRes = await waitForSaleStart(deviceId, targetUnix, {
+        ...signalGateOptions,
+        observeFromUnix: fireAt,
+        progressCb: onProgress,
+      });
+      logger.info(
+        `[checklist] 开票判定: trigger=${waitRes.trigger} baseline=${waitRes.baselineEstablished} ` +
+          `rearm=${waitRes.rearmCount} refreshes=${waitRes.refreshes} uiDisabled=${waitRes.uiDisabled}`,
+      );
+    }
     end(p3);
 
     // ---- Phase 4: fire ----

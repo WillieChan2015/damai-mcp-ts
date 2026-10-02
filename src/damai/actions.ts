@@ -38,6 +38,19 @@ export const DAMAI_AUTH_ACTIVITY_MARKERS = [
 // 键名保持 Python 版 dict 的 snake_case 原样（这是 MCP 工具响应的对外表面，
 // checklist 与上层 server 直接按这些键取值，改动会破坏行为保真）。
 
+/** 官方订单列表页（人工核对入口；needs_action / submitted 时随结果返回）。 */
+export const DAMAI_ORDERS_URL = "https://orders.damai.cn/orderList";
+
+/**
+ * needs_action 状态的固定中文提示（逐字固定，便于上层按前缀识别）。
+ *
+ * 语义同构于 tickets 的 `Outcome::action("订单请求结果未确认，请先检查官方
+ * 订单页，避免重复下单", ORDERS)`：提交订单的点击是否送达设备未知时，
+ * 结果既不是成功也不是失败——用户必须先核对官方订单页，再决定是否重跑，
+ * 否则会重复下单。
+ */
+export const NEEDS_ACTION_MESSAGE = "订单请求结果未确认，请先检查官方订单页，避免重复下单";
+
 /** {@link damaiLoginCheck} 的返回结构。 */
 export type LoginCheckResult = {
   /** 用户是否已登录。 */
@@ -59,8 +72,12 @@ export type OpenConcertResult = {
 
 /** {@link damaiGrab} 的返回结构。`failed` 分支只含基础四键。 */
 export type GrabResult = {
-  /** "ready_for_human"（等人工确认）| "submitted"（已提交订单）| "failed"。 */
-  status: "ready_for_human" | "submitted" | "failed";
+  /**
+   * "ready_for_human"（等人工确认）| "submitted"（已提交订单）|
+   * "needs_action"（订单请求结果未确认——先查官方订单页，切勿直接重跑）|
+   * "failed"。
+   */
+  status: "ready_for_human" | "submitted" | "needs_action" | "failed";
   /** 从流程开始到结束的耗时（毫秒）。 */
   elapsed_ms: number;
   item_id?: string;
@@ -70,6 +87,8 @@ export type GrabResult = {
   requires_human_confirmation?: boolean;
   /** 是否已触碰支付流程（恒为 false——支付永远不自动点击）。 */
   payment_started?: boolean;
+  /** 官方订单页 URL；submitted 与 needs_action 时携带，其余省略。 */
+  order_url?: string;
   /** 调试截图路径列表。 */
   screenshots: string[];
   /** 失败原因；成功为 null。 */
@@ -474,7 +493,14 @@ export interface DamaiGrabOptions {
  * 与 Python 原版一致：`maxRuntimeSec` / `ticketNum` 参数为 API 对等保留，
  * 函数体内未实现对应的硬停止 / 张数逻辑。
  *
- * @returns {@link GrabResult}（status: "ready_for_human" | "submitted" | "failed"）
+ * needs_action 语义：提交订单的点击发出后结果无法确认（如 adb 传输异常）时，
+ * 返回 `status: "needs_action"` 并携带官方订单页 {@link DAMAI_ORDERS_URL}——
+ * 调用方应提示用户先人工核对订单，再决定是否重跑，避免重复下单。
+ * tickets 的订单终止词表（VALIDATE/TOKEN/SESSION/登录/令牌/未支付/限购/实名）
+ * 依赖 build/create 重试环，本函数无重试环，暂不移植（未来工作）。
+ *
+ * @returns {@link GrabResult}
+ *   （status: "ready_for_human" | "submitted" | "needs_action" | "failed"）
  */
 export async function damaiGrab(
   deviceId: string,
@@ -587,10 +613,46 @@ export async function damaiGrab(
 
     // 只有调用方显式选择提交时才会走到这里。支付仍在本自动化流程之外，
     // 必须由用户完成。
-    await damaiConfirmOrder(deviceId, { selectors: sel });
+    //
+    // 提交段三态语义（防重复下单）：
+    // ① 定位失败（确认按钮从未出现）→ 订单请求必然未发出，原样上抛走既有
+    //    失败路径，无重复下单风险；
+    // ② 点击传输异常（waitForElement 已成功、tap 经 adb shell 抛错）→ 点击
+    //    是否送达设备未知，订单请求可能已被 app 发出 → needs_action：
+    //    提示先查官方订单页，切勿直接重跑；
+    // ③ 点击成功后的非致命失败（如调试截图）→ 订单已提交，仍返回 submitted，
+    //    不降级为 failed（否则用户看到失败会重跑流程、重复下单）。
+    try {
+      await damaiConfirmOrder(deviceId, { selectors: sel });
+    } catch (exc) {
+      if (exc instanceof UIElementNotFoundError) {
+        // 阶段 ①：确认按钮定位失败 ≠ 已发单——保持既有语义原样上抛
+        throw exc;
+      }
+      // 阶段 ②：定位成功后的点击传输异常——结果未知，按 needs_action 报告
+      const elapsed = Math.trunc((nowSec() - tStart) * 1000);
+      return {
+        status: "needs_action",
+        elapsed_ms: elapsed,
+        item_id: itemId,
+        price_index: priceIndex,
+        viewer_names: viewers,
+        requires_human_confirmation: true,
+        payment_started: false,
+        order_url: DAMAI_ORDERS_URL,
+        screenshots: logPaths,
+        error: `${NEEDS_ACTION_MESSAGE}（原因: ${excToStr(exc)}）`,
+      };
+    }
+    // 阶段 ③：点击已成功送达——此后任何非致命失败都不得把已提交的订单
+    // 降级为 failed；调试截图失败只损失该张截图。
     const submittedShot = join(shotsDirPath, `order_submitted_${truncSec()}.png`);
-    await screenshot(deviceId, submittedShot);
-    logPaths.push(submittedShot);
+    try {
+      await screenshot(deviceId, submittedShot);
+      logPaths.push(submittedShot);
+    } catch (exc) {
+      logger.warning(`提交后调试截图失败（忽略，订单已提交）: ${excToStr(exc)}`);
+    }
 
     const elapsed = Math.trunc((nowSec() - tStart) * 1000);
     return {
@@ -601,6 +663,7 @@ export async function damaiGrab(
       viewer_names: viewers,
       requires_human_confirmation: false,
       payment_started: false,
+      order_url: DAMAI_ORDERS_URL,
       screenshots: logPaths,
       error: null,
     };

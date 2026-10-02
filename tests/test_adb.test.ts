@@ -10,12 +10,23 @@
  *   * mock `node:fs` 的 `existsSync`（仅「模拟器路径回退」用例需要，
  *     对应 Python patch `pathlib.Path.exists`）。
  */
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ADBResult, adb, shell, whichAdb } from "../src/device/adb";
+import {
+  ADBResult,
+  AdbShellClosedError,
+  AdbShellTimeoutError,
+  PersistentAdbShell,
+  adb,
+  shell,
+  whichAdb,
+} from "../src/device/adb";
 import { ADBError } from "../src/utils/errors";
 import {
   captureRejection,
@@ -172,5 +183,281 @@ describe("shell()（对应 shell 协程）", () => {
   it("test_shell_returns_stdout", async () => {
     useFakeProc({ stdout: Buffer.from("uid=0\n"), returncode: 0 });
     await expect(shell("id")).resolves.toBe("uid=0");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PersistentAdbShell（借鉴 damai PersistentAdbShell）
+//
+// 复用上方的 mocks.spawnImpl 注入机制；持久 shell 的假进程在本文件内自定义
+// （helpers.ts 的 makeFakeProc stdin 恒为 null，且不在本项名下）：
+// EventEmitter + PassThrough 三流，stdin 可写并按 \n 切行分派给用例脚本。
+// ---------------------------------------------------------------------------
+
+/**
+ * 持久 shell 假进程：stdin/stdout/stderr 均为 PassThrough，结构上与
+ * ChildProcess 兼容（kill / exitCode / signalCode / pid），由用例投喂
+ * stdout 回放字节并手动触发 EOF。
+ */
+class FakeShellProc extends EventEmitter {
+  readonly stdin = new PassThrough();
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
+  pid: number | undefined = 4242;
+  killed = false;
+
+  /** 收到的 kill 信号序列（用例 ⑧ 断言 SIGTERM → SIGKILL 升级）。 */
+  readonly killSignals: NodeJS.Signals[] = [];
+  /** 收到的完整 stdin 协议行（按 \n 切分、剥行尾 \r）。 */
+  readonly lines: string[] = [];
+  /** 收到的原始 stdin 写入（次数 + 字节，用例 ① 断言整条链一次 write）。 */
+  readonly rawWrites: Buffer[] = [];
+
+  /** stdin 行分派脚本（由用例注入；回执回放通常经 {@link reply}）。 */
+  onLine: (line: string, proc: FakeShellProc) => void = () => {};
+
+  /** 响应哪些 kill 信号时退出；SIGKILL-only 用于用例 ⑧ 的升级路径。 */
+  private readonly exitOnSignals: ReadonlySet<string>;
+
+  constructor(opts: { exitOnSignals?: readonly NodeJS.Signals[] } = {}) {
+    super();
+    this.exitOnSignals = new Set(opts.exitOnSignals ?? ["SIGTERM", "SIGKILL"]);
+    let buffered = Buffer.alloc(0);
+    this.stdin.on("data", (chunk: Buffer) => {
+      this.rawWrites.push(chunk);
+      buffered = Buffer.concat([buffered, chunk]);
+      let idx = buffered.indexOf(0x0a);
+      while (idx >= 0) {
+        const line = buffered.subarray(0, idx).toString("utf8").replace(/\r$/, "");
+        buffered = buffered.subarray(idx + 1);
+        this.lines.push(line);
+        this.onLine(line, this);
+        idx = buffered.indexOf(0x0a);
+      }
+    });
+    this.stdin.on("error", () => {});
+  }
+
+  kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+    this.killed = true;
+    this.killSignals.push(signal);
+    if (this.exitOnSignals.has(signal) && this.exitCode === null && this.signalCode === null) {
+      this.exitCode = 0;
+      setImmediate(() => {
+        this.stdout.end();
+        this.stderr.end();
+        this.emit("close", 0, null);
+      });
+    }
+    return true;
+  }
+
+  /** 用例手动触发 EOF（stdout/stderr end + 进程 close）。 */
+  finish(exitCode = 0): void {
+    this.exitCode = exitCode;
+    setImmediate(() => {
+      this.stdout.end();
+      this.stderr.end();
+      this.emit("close", exitCode, null);
+    });
+  }
+
+  /**
+   * 便捷回放：从协议行提取 `echo <marker>` 并向 stdout 写入
+   * `[prefix]<marker><行尾>`；行尾默认 \n，crlf=true 时为 \r\n（Windows 形态）。
+   */
+  reply(line: string, opts: { prefix?: Buffer; crlf?: boolean } = {}): void {
+    const m = line.match(/echo (__DMCTS_[A-Z]+_\d+_DONE__)/);
+    if (m === null) {
+      return;
+    }
+    const eol = opts.crlf ? "\r\n" : "\n";
+    this.stdout.write(Buffer.concat([opts.prefix ?? Buffer.alloc(0), Buffer.from(`${m[1]}${eol}`)]));
+  }
+}
+
+/** 注入持久 shell 假进程并 open：返回被测实例、假进程与 spawn 实参快照。 */
+async function openFakePersistentShell(
+  onLine: (line: string, proc: FakeShellProc) => void,
+  options: { deviceId?: string; exitOnSignals?: readonly NodeJS.Signals[] } = {},
+): Promise<{ sh: PersistentAdbShell; proc: FakeShellProc; spawnArgs: string[] }> {
+  const proc = new FakeShellProc({ exitOnSignals: options.exitOnSignals });
+  proc.onLine = onLine;
+  let spawnArgs: string[] = [];
+  mocks.spawnImpl = (_file, args) => {
+    spawnArgs = [...args];
+    return proc as unknown as ChildProcess;
+  };
+  const sh = await PersistentAdbShell.open({ deviceId: options.deviceId ?? null });
+  return { sh, proc, spawnArgs };
+}
+
+describe("PersistentAdbShell（借鉴 damai PersistentAdbShell）", () => {
+  it("taps：单行拼接 + 整条链一次 write + CRLF 回执容忍", async () => {
+    const { sh, proc, spawnArgs } = await openFakePersistentShell((line, fake) => {
+      fake.reply(line, { crlf: true });
+    });
+    expect(spawnArgs).toEqual(["shell"]);
+    await sh.taps(
+      [
+        [100, 200],
+        [300, 400],
+      ],
+      { gapMs: 50 },
+    );
+    expect(proc.rawWrites).toHaveLength(1);
+    expect(proc.lines).toEqual([
+      "input tap 100 200; sleep 0.05; input tap 300 400; echo __DMCTS_TAP_1_DONE__",
+    ]);
+    await sh.close();
+  });
+
+  it("taps：initialDelayMs 前置 sleep、零间隙省略 sleep、marker 序号实例内自增", async () => {
+    const { sh, proc } = await openFakePersistentShell((line, fake) => fake.reply(line));
+    await sh.taps([[1, 2]], { initialDelayMs: 250 });
+    await sh.taps([
+      [1, 2],
+      [3, 4],
+    ]);
+    expect(proc.lines).toEqual([
+      "sleep 0.25; input tap 1 2; echo __DMCTS_TAP_1_DONE__",
+      "input tap 1 2; input tap 3 4; echo __DMCTS_TAP_2_DONE__",
+    ]);
+    await sh.close();
+  });
+
+  it("swipe：单行拼接与 SWIPE marker", async () => {
+    const { sh, proc } = await openFakePersistentShell((line, fake) => fake.reply(line));
+    await sh.swipe(10, 20, 300, 400, 300);
+    expect(proc.lines).toEqual(["input swipe 10 20 300 400 300; echo __DMCTS_SWIPE_1_DONE__"]);
+    await sh.close();
+  });
+
+  it("run：marker 前含 0x80-0xFF 噪声字节不破坏字节级搜索，返回噪声行", async () => {
+    // 非法 utf-8 序列：解码视图应逐字节替换为 U+FFFD，marker 仍按 ASCII 字节命中
+    const noise = Buffer.from([0x80, 0xfe, 0xff, 0x81]);
+    const { sh } = await openFakePersistentShell((line, fake) => {
+      fake.reply(line, { prefix: Buffer.concat([noise, Buffer.from("\n")]) });
+    });
+    await expect(sh.run("getprop ro.product.model")).resolves.toBe("\uFFFD\uFFFD\uFFFD\uFFFD");
+    await sh.close();
+  });
+
+  it("run：无输出命令返回空串", async () => {
+    const { sh } = await openFakePersistentShell((line, fake) => fake.reply(line));
+    await expect(sh.run("true")).resolves.toBe("");
+    await sh.close();
+  });
+
+  it("EOF 先于 marker：AdbShellClosedError「在命令完成前结束」", async () => {
+    const { sh, proc } = await openFakePersistentShell(() => {}); // 不回放任何回执
+    const pending = sh.run("echo hi");
+    await new Promise((resolve) => setImmediate(resolve)); // 确保写入与等待器已注册
+    proc.finish();
+    const err = await captureRejection(pending);
+    expect(err).toBeInstanceOf(AdbShellClosedError);
+    expect((err as Error).name).toBe("AdbShellClosedError");
+    expect((err as Error).message).toMatch(/在命令完成前结束/);
+    await sh.close();
+  });
+
+  it("close 后调用：run/fire 抛「进程已退出」，close 幂等", async () => {
+    const { sh, proc } = await openFakePersistentShell(() => {});
+    await sh.close();
+    expect(proc.killSignals).toEqual(["SIGTERM"]); // 假进程响应 SIGTERM 即退出
+    expect(sh.alive).toBe(false);
+    const err = await captureRejection(sh.run("getprop"));
+    expect(err).toBeInstanceOf(AdbShellClosedError);
+    expect((err as Error).message).toMatch(/进程已退出/);
+    expect(() => sh.fire("input tap 1 1")).toThrow(AdbShellClosedError);
+    await expect(sh.close()).resolves.toBeUndefined();
+  });
+
+  it("回执超时：AdbShellTimeoutError 且通道自动关闭，后续 run 拒绝", async () => {
+    const { sh } = await openFakePersistentShell(() => {}); // 不回放 marker
+    const err = await captureRejection(sh.run("slow", { receiptTimeoutMs: 20 }));
+    expect(err).toBeInstanceOf(AdbShellTimeoutError);
+    expect((err as Error).name).toBe("AdbShellTimeoutError");
+    expect((err as Error).message).toMatch(/持久 shell 命令超时（>20ms）/);
+    expect(sh.alive).toBe(false); // deviation：超时即自动 close()（字节流可能失步）
+    const next = await captureRejection(sh.run("next"));
+    expect(next).toBeInstanceOf(AdbShellClosedError);
+    expect((next as Error).message).toMatch(/进程已退出/);
+    await sh.close();
+  });
+
+  it("marker 唯一性：fire 的迟到 marker 不使命令 2 误命中", async () => {
+    const { sh } = await openFakePersistentShell((line, fake) => {
+      const m = line.match(/echo (__DMCTS_CMD_\d+_DONE__)/);
+      // 只回放 fire（序号 1）的 marker；命令 2 的 marker 永不回放
+      if (m !== null && m[1].endsWith("_1_DONE__")) {
+        fake.stdout.write(Buffer.from(`${m[1]}\n`));
+      }
+    });
+    sh.fire("input tap 1 1");
+    const err = await captureRejection(sh.run("getprop", { receiptTimeoutMs: 30 }));
+    expect(err).toBeInstanceOf(AdbShellTimeoutError);
+    expect(sh.alive).toBe(false);
+    await sh.close();
+  });
+
+  it("fire 即发即忘：不等回执，其 marker 由下一条命令的回执唯一定界", async () => {
+    const { sh, proc } = await openFakePersistentShell((line, fake) => {
+      fake.reply(line, { prefix: Buffer.from("junk\n") });
+    });
+    expect(sh.fire("input tap 5 5")).toBeUndefined();
+    // fire 的 marker（序号 1）无人消费，落在命令 2 回执之前的输出行里
+    await expect(sh.run("getprop ro.product.model")).resolves.toBe(
+      "junk\n__DMCTS_CMD_1_DONE__\njunk",
+    );
+    expect(proc.lines).toHaveLength(2); // fire 与 run 各一次单行写入
+    await sh.close();
+  });
+
+  it("close：SIGTERM 1s 内未退出则补 SIGKILL", async () => {
+    const { sh, proc } = await openFakePersistentShell(() => {}, { exitOnSignals: ["SIGKILL"] });
+    await sh.close();
+    expect(proc.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(sh.alive).toBe(false);
+    await expect(sh.close()).resolves.toBeUndefined(); // 幂等
+  });
+
+  it("open：spawn 参数按 deviceId 拼 -s；adb 未找到沿用 adb() 原文案", async () => {
+    const withDevice = await openFakePersistentShell(() => {}, { deviceId: "emulator-5554" });
+    expect(withDevice.spawnArgs).toEqual(["-s", "emulator-5554", "shell"]);
+    await withDevice.sh.close();
+
+    const noDevice = await openFakePersistentShell(() => {});
+    expect(noDevice.spawnArgs).toEqual(["shell"]);
+    await noDevice.sh.close();
+
+    // PATH 探测落空 + 模拟器候选路径全不存在（等价 patch which_adb → None）
+    const emptyDir = mkdtempSync(join(tmpdir(), "damai-adb-empty-"));
+    try {
+      vi.stubEnv("PATH", emptyDir);
+      mocks.existsSyncImpl = () => false;
+      const err = await captureRejection(PersistentAdbShell.open());
+      expect(err).toBeInstanceOf(ADBError);
+      expect((err as Error).message).toMatch(/adb 未找到/);
+    } finally {
+      vi.unstubAllEnvs();
+      removeTempDir(emptyDir);
+    }
+  });
+
+  it("命令与坐标校验：中文 TypeError，空 taps 不写任何字节", async () => {
+    const { sh, proc } = await openFakePersistentShell(() => {});
+    expect(() => sh.run("echo a\necho b")).toThrow(TypeError);
+    expect(() => sh.run("echo a\necho b")).toThrow(/命令不能包含换行符/);
+    expect(() => sh.run("echo __DMCTS_CMD_9_DONE__")).toThrow(/命令与回执 marker 冲突/);
+    expect(() => sh.fire("x\ny")).toThrow(TypeError);
+    expect(() => sh.taps([[-1, 0]])).toThrow(/必须为非负整数/);
+    expect(() => sh.taps([[1.5, 2]])).toThrow(TypeError);
+    expect(() => sh.swipe(0, 0, 100, 100, -1)).toThrow(/必须为非负整数/);
+    await expect(sh.taps([])).resolves.toBeUndefined();
+    expect(proc.rawWrites).toHaveLength(0);
+    await sh.close();
   });
 });

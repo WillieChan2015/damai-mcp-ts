@@ -37,6 +37,7 @@ import {
   damaiSelectViewers,
 } from "./damai/actions";
 import { runChecklist } from "./damai/checklist";
+import { monitorAvailability } from "./damai/monitor";
 import { whichAdb } from "./device/adb";
 import { LDPlayerInstance, launchInstance, whichLdconsole } from "./device/ldplayer";
 import { DeviceManager } from "./device/manager";
@@ -48,6 +49,7 @@ import {
   findByXpath,
   waitForElement,
 } from "./inspector/find";
+import { CLAWBOT_DEFAULT_TIMEOUT_MS, ClawBotClient } from "./notify/wechat";
 import { configure as configureLogging, logger } from "./utils/logging";
 import { DEFAULT_NTP_SERVER, asyncQuery, fetchDeviceTime } from "./utils/ntp";
 
@@ -695,7 +697,9 @@ export function createMcpServer(): McpServer {
         "    ticket_num: 张数。\n" +
         '    open_time: 开票时间 "YYYY-MM-DD HH:MM:SS"（空=立即抢）。\n' +
         "    preheat_seconds: 开票前多少秒开始预热（默认 30）。\n" +
-        "    max_runtime_sec: 整个流程最大耗时（默认 600 秒）。",
+        "    max_runtime_sec: 整个流程最大耗时（默认 600 秒）。\n\n" +
+        "注意：提交结果可能出现 status=needs_action：表示订单请求结果未确认，\n" +
+        "请先打开 https://orders.damai.cn/orderList 人工核对，切勿直接重跑。",
       inputSchema: {
         device_id: z.string(),
         item_id: z.string(),
@@ -882,6 +886,135 @@ export function createMcpServer(): McpServer {
         onProgress: progressCb,
       });
       return dictResult(res.toDict());
+    },
+  );
+
+  // ---- 只读余票监控（docs/improvements-from-competitors.md §7.5） -------------
+  // 只读硬约束：轮询期间零写入指令，绝不点击购买、绝不提交订单。
+
+  mcp.registerTool(
+    "damai_monitor_availability",
+    {
+      description:
+        "只读监控大麦详情页余票状态：判定 available/not_on_sale/sold_out/unknown；" +
+        "**绝不点击购买、绝不提交订单**。\n\n" +
+        "轮询 uiautomator dump 并把页面证据折叠为四态；发现可购 CTA（如「立即购买」）" +
+        "立即返回 found=true；dump 连续失败自动指数退避并停止。\n\n" +
+        "Args:\n" +
+        "    device_id: 设备 ID。\n" +
+        "    item_id: 大麦 item id（数字字符串）。\n" +
+        "    interval_ms: 轮询间隔毫秒（5000-3600000，默认 30000）。\n" +
+        "    max_attempts: 最大尝试次数（0=无限；工具层默认 720，避免调用方忘记终止）。\n" +
+        "    max_consecutive_errors: dump 连续失败多少次后停止（默认 5）。\n" +
+        "    open_page: 开始时是否深链打开详情页（默认 true；属导航非点击，只执行一次）。\n" +
+        "    deadline_unix_ms: 墙钟截止（Unix 毫秒），到达即停 timeout；null=不设截止。",
+      inputSchema: {
+        device_id: z.string(),
+        item_id: z.string(),
+        interval_ms: z.number().int().min(5000).max(3600000).default(30000),
+        // 库层 0=无限语义保留；工具层默认给有限值（§7.5），zod min/max 承担边界校验
+        max_attempts: z.number().int().min(0).max(100000).default(720),
+        max_consecutive_errors: z.number().int().min(1).max(50).default(5),
+        open_page: z.boolean().default(true),
+        deadline_unix_ms: z.number().nullable().default(null),
+      },
+      outputSchema: DICT_OUTPUT,
+    },
+    async ({
+      device_id,
+      item_id,
+      interval_ms,
+      max_attempts,
+      max_consecutive_errors,
+      open_page,
+      deadline_unix_ms,
+    }) => {
+      const result = await monitorAvailability(device_id, item_id, {
+        intervalMs: interval_ms,
+        maxAttempts: max_attempts,
+        maxConsecutiveErrors: max_consecutive_errors,
+        openPage: open_page,
+        deadlineUnixMs: deadline_unix_ms,
+        onReport: (snapshot) => {
+          const reasonText = snapshot.reason === null ? "" : `（${snapshot.reason}）`;
+          const nextText =
+            snapshot.nextDelayMs === null ? "" : `，${Math.round(snapshot.nextDelayMs / 1000)}s 后继续`;
+          logger.info(
+            `[monitor] 第 ${snapshot.attempt} 次采样: ${snapshot.status}${reasonText}${nextText}`,
+          );
+        },
+      });
+      return dictResult(result.toDict());
+    },
+  );
+
+  // ---- 通知（docs/improvements-from-competitors.md §7.6） --------------------
+  // 只发消息，绝不自动支付。凭证缺省回落环境变量（§7.6：具体由接线工程师定）。
+
+  mcp.registerTool(
+    "notify_send",
+    {
+      description:
+        "通过微信 ClawBot 机器人发送一条文本通知（只发消息，绝不自动支付）。\n\n" +
+        "发送幂等语义：每次调用至多发出一次 HTTP 请求，内部零自动重试；\n" +
+        "超时返回 timeout_unknown（送达状态未知），不会自动重发；如确需重试，\n" +
+        "携带返回的 client_id 再次调用，由服务端幂等去重。\n\n" +
+        "Args:\n" +
+        "    target: 接收人 user id。\n" +
+        "    text: 要发送的文本（默认上限 4096 字符）。\n" +
+        "    origin: ClawBot 服务 origin（https，host ∈ *.ilinkai.weixin.qq.com）；\n" +
+        "            缺省回落环境变量 DAMAI_CLAWBOT_ORIGIN。\n" +
+        "    token: Bearer 令牌；缺省回落环境变量 DAMAI_CLAWBOT_TOKEN。\n" +
+        "    context_token: 会话上下文 token；缺省回落环境变量 DAMAI_CLAWBOT_CONTEXT_TOKEN。\n" +
+        "    client_id: 可选幂等键；人工重试时传入上次的 client_id 以便服务端去重。\n" +
+        "    timeout_ms: 单次请求超时毫秒（默认 10000）。",
+      inputSchema: {
+        target: z.string(),
+        text: z.string(),
+        origin: z.string().optional(),
+        token: z.string().optional(),
+        context_token: z.string().optional(),
+        client_id: z.string().optional(),
+        timeout_ms: z.number().default(CLAWBOT_DEFAULT_TIMEOUT_MS),
+      },
+      outputSchema: DICT_OUTPUT,
+    },
+    async ({ target, text, origin, token, context_token, client_id, timeout_ms }) => {
+      // 凭证缺省回落环境变量（§7.6）；缺省 transport 为 fetch，显式调用才会真正出网
+      const finalOrigin = origin ?? process.env.DAMAI_CLAWBOT_ORIGIN;
+      const finalToken = token ?? process.env.DAMAI_CLAWBOT_TOKEN;
+      const finalContextToken = context_token ?? process.env.DAMAI_CLAWBOT_CONTEXT_TOKEN;
+      if (finalOrigin === undefined || finalOrigin === "") {
+        throw new Error("notify_send 缺少 origin：请传参或设置环境变量 DAMAI_CLAWBOT_ORIGIN");
+      }
+      if (finalToken === undefined || finalToken === "") {
+        throw new Error("notify_send 缺少 token：请传参或设置环境变量 DAMAI_CLAWBOT_TOKEN");
+      }
+      if (finalContextToken === undefined || finalContextToken === "") {
+        throw new Error(
+          "notify_send 缺少 context_token：请传参或设置环境变量 DAMAI_CLAWBOT_CONTEXT_TOKEN",
+        );
+      }
+      // origin 强校验 / 六协议头 / 载荷组装 / 响应守卫都在 ClawBotClient 内部完成；
+      // 空 target / text 等参数校验失败时它会在发出任何请求前抛中文错误
+      const client = new ClawBotClient({
+        origin: finalOrigin,
+        token: finalToken,
+        timeoutMs: timeout_ms,
+      });
+      const outcome = await client.sendText(
+        target,
+        finalContextToken,
+        text,
+        client_id === undefined ? undefined : { clientId: client_id },
+      );
+      return dictResult({
+        status: outcome.status,
+        client_id: outcome.clientId,
+        error: outcome.error,
+        http_status: outcome.httpStatus,
+        elapsed_ms: outcome.elapsedMs,
+      });
     },
   );
 
