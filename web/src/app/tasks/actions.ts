@@ -6,6 +6,8 @@ import { z } from "zod";
 import { grabTaskInputSchema } from "@core/schemas/grab";
 
 import { actionClient } from "@/lib/safe-action";
+import { prepareViewerPresets } from "@/lib/viewerPresetRules";
+import { saveViewerPresetsStore } from "@/lib/viewerPresets";
 import { getTaskManager } from "@/task/manager";
 import { makeGrabRunner } from "@/task/grabRunner";
 
@@ -22,6 +24,23 @@ export const startGrabTask = actionClient
     });
     revalidatePath("/tasks");
     return { taskId: snapshot.id, status: snapshot.status };
+  });
+
+/** 覆盖保存观演人快捷姓名。不 revalidate：避免刷新任务表单丢掉尚未提交的输入。 */
+export const saveViewerPresets = actionClient
+  .metadata({ operation: "保存观演人快捷项" })
+  .schema(
+    z.object({
+      names: z.array(z.string()),
+    }),
+  )
+  .action(async ({ parsedInput }) => {
+    const prepared = prepareViewerPresets(parsedInput.names);
+    if (!prepared.ok) {
+      throw new Error(prepared.error);
+    }
+    const names = saveViewerPresetsStore(prepared.names);
+    return { names };
   });
 
 /** 取消任务：置位 stopEvent；候场阶段在下一个检查点退出（D9）。 */

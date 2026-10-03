@@ -1,7 +1,8 @@
+import { Card } from "@/components/ui/card";
 import Link from "next/link";
 
 import { DeviceManager } from "@core/device/manager";
-import { Glyph, MetricCard, type GlyphName } from "@/components/ui";
+import { Glyph, MetricCard, type GlyphName } from "@/components/console";
 import { getTaskManager } from "@/task/manager";
 import { loadNotifyStatusSnapshot } from "@/app/notify/notifyConfig";
 
@@ -102,9 +103,9 @@ export default async function Home() {
   return (
     <div className="space-y-8">
       {/* 顶部时钟基准与战备指示 */}
-      <section className="panel p-6 sm:p-8">
+      <Card className="p-6 sm:p-8">
         <ClockHero />
-      </section>
+      </Card>
 
       {/* 战备四态看板 */}
       <section aria-label="战备四态看板" className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">

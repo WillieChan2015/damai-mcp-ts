@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { deviceChoiceLabel, type DeviceIdentity } from "@/lib/deviceLabel";
 
 /** 轮询间隔（ms）：与 no-store + 时间戳查询参数配合防缓存。 */
@@ -51,21 +52,19 @@ export function ScreenshotPreview({ devices }: { devices: PreviewDevice[] }) {
       {devices.length > 1 && (
         <div className="flex flex-wrap gap-2">
           {devices.map((d) => (
-            <button
+            <Button
               key={d.deviceId}
               type="button"
+              size="xs"
+              variant={selected === d.deviceId ? "default" : "outline"}
               onClick={() => {
                 setSelected(d.deviceId);
                 setFailed(false);
               }}
-              className={`rounded border px-3 py-1 font-mono text-xs transition-colors ${
-                selected === d.deviceId
-                  ? "border-ink bg-ink text-paper font-semibold"
-                  : "border-line bg-surface text-muted hover:border-line-strong hover:text-ink"
-              }`}
+              className="font-mono"
             >
               {deviceChoiceLabel(d)}
-            </button>
+            </Button>
           ))}
         </div>
       )}

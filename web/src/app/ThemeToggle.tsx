@@ -1,13 +1,15 @@
 "use client";
 
+import { Monitor, Moon, Sun } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Glyph } from "@/components/ui";
+
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 type ThemeMode = "light" | "dark" | "system";
 
 /**
- * 主题切换控制器：
- * 支持白天模式 (light)、夜间深色 (dark) 与系统偏好跟随 (system)。
+ * 主题切换：浅色、深色、跟随系统。
+ * system 清掉 data-theme 与 localStorage，交给 prefers-color-scheme。
  */
 export function ThemeToggle() {
   const [mode, setMode] = useState<ThemeMode>("system");
@@ -15,7 +17,7 @@ export function ThemeToggle() {
 
   useEffect(() => {
     setMounted(true);
-    const saved = localStorage.getItem("damai_theme") as ThemeMode | null;
+    const saved = localStorage.getItem("damai_theme");
     if (saved === "light" || saved === "dark" || saved === "system") {
       setMode(saved);
       applyTheme(saved);
@@ -40,59 +42,30 @@ export function ThemeToggle() {
   };
 
   if (!mounted) {
-    return <div className="h-6 w-20 shrink-0" />;
+    return <div className="h-7 w-24 shrink-0" />;
   }
 
   return (
-    <div
-      role="radiogroup"
+    <ToggleGroup
+      type="single"
+      value={mode}
+      onValueChange={(next) => {
+        if (next === "light" || next === "dark" || next === "system") selectMode(next);
+      }}
+      size="sm"
+      spacing={0}
       aria-label="主题切换"
-      className="flex items-center rounded border border-line bg-surface p-0.5 shrink-0"
+      className="shrink-0 rounded-md border border-border bg-card p-0.5"
     >
-      <button
-        type="button"
-        role="radio"
-        aria-checked={mode === "light"}
-        onClick={() => selectMode("light")}
-        title="白天浅色主题"
-        className={`flex h-5 w-6.5 items-center justify-center rounded transition-colors ${
-          mode === "light"
-            ? "bg-surface-raised text-ink font-semibold shadow-xs"
-            : "text-muted hover:text-ink"
-        }`}
-      >
-        <Glyph name="sun" className="h-3.5 w-3.5" />
-      </button>
-
-      <button
-        type="button"
-        role="radio"
-        aria-checked={mode === "dark"}
-        onClick={() => selectMode("dark")}
-        title="夜间深色主题"
-        className={`flex h-5 w-6.5 items-center justify-center rounded transition-colors ${
-          mode === "dark"
-            ? "bg-surface-raised text-ink font-semibold shadow-xs"
-            : "text-muted hover:text-ink"
-        }`}
-      >
-        <Glyph name="moon" className="h-3.5 w-3.5" />
-      </button>
-
-      <button
-        type="button"
-        role="radio"
-        aria-checked={mode === "system"}
-        onClick={() => selectMode("system")}
-        title="跟随系统外观"
-        className={`flex h-5 w-6.5 items-center justify-center rounded transition-colors ${
-          mode === "system"
-            ? "bg-surface-raised text-ink font-semibold shadow-xs"
-            : "text-muted hover:text-ink"
-        }`}
-      >
-        <Glyph name="monitor" className="h-3.5 w-3.5" />
-      </button>
-    </div>
+      <ToggleGroupItem value="light" aria-label="白天浅色主题" title="白天浅色主题" className="px-1.5">
+        <Sun />
+      </ToggleGroupItem>
+      <ToggleGroupItem value="dark" aria-label="夜间深色主题" title="夜间深色主题" className="px-1.5">
+        <Moon />
+      </ToggleGroupItem>
+      <ToggleGroupItem value="system" aria-label="跟随系统外观" title="跟随系统外观" className="px-1.5">
+        <Monitor />
+      </ToggleGroupItem>
+    </ToggleGroup>
   );
 }

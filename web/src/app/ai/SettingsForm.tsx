@@ -1,5 +1,9 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -13,8 +17,6 @@ import type { AiSettingsStatus } from "@/lib/aiConfig";
  * 保存会整体覆盖三要素（POST 校验要求 apiKey 必填）。
  */
 
-const inputCls =
-  "field";
 const labelCls = "block text-xs font-medium text-zinc-600 dark:text-zinc-400";
 
 /** 来源 → 中文标签。 */
@@ -59,7 +61,7 @@ export function SettingsForm({ status }: { status: AiSettingsStatus }) {
   };
 
   return (
-    <section className="panel p-6">
+    <Card className="p-6">
       <div className="flex flex-wrap items-center gap-2">
         <h2 className="text-base font-semibold text-ink">Provider 设置</h2>
         <span
@@ -93,40 +95,40 @@ export function SettingsForm({ status }: { status: AiSettingsStatus }) {
           <label className={labelCls} htmlFor="ai-base-url">
             Base URL（必填，合法 URL）
           </label>
-          <input
+          <Input
             id="ai-base-url"
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
             placeholder="https://api.example.com/v1"
             autoComplete="off"
-            className={`mt-1 ${inputCls}`}
+            className="mt-1"
           />
         </div>
         <div>
           <label className={labelCls} htmlFor="ai-api-key">
             API Key（必填；保存整体覆盖，不回填已存原文）
           </label>
-          <input
+          <Input
             id="ai-api-key"
             type="password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             placeholder={status.maskedKey ?? "sk-…"}
             autoComplete="off"
-            className={`mt-1 ${inputCls}`}
+            className="mt-1"
           />
         </div>
         <div>
           <label className={labelCls} htmlFor="ai-model">
             模型名（必填）
           </label>
-          <input
+          <Input
             id="ai-model"
             value={model}
             onChange={(e) => setModel(e.target.value)}
             placeholder="gpt-4o-mini / deepseek-chat / …"
             autoComplete="off"
-            className={`mt-1 ${inputCls}`}
+            className="mt-1"
           />
         </div>
 
@@ -140,15 +142,11 @@ export function SettingsForm({ status }: { status: AiSettingsStatus }) {
         ) : null}
 
         <div>
-          <button
-            type="submit"
-            disabled={saving}
-            className="btn btn-primary px-4 py-2"
-          >
+          <Button type="submit" disabled={saving}>
             {saving ? "保存中…" : "保存设置"}
-          </button>
+          </Button>
         </div>
       </form>
-    </section>
+    </Card>
   );
 }

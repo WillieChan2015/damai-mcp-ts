@@ -1,6 +1,8 @@
 "use client";
 
 import type { Availability } from "@core/damai/monitor";
+
+import { Badge } from "@/components/ui/badge";
 import type { TaskStatus } from "@/task/manager";
 
 /**
@@ -29,17 +31,15 @@ const AVAILABILITY_TEXT: Record<Availability, string> = {
 export function AvailabilityBadge({ status }: { status: Availability | null }) {
   if (status === null) {
     return (
-      <span className="inline-block rounded border border-line bg-surface-raised px-2 py-0.5 text-xs text-muted">
+      <Badge variant="outline" className="border-line bg-secondary text-muted">
         待采样
-      </span>
+      </Badge>
     );
   }
   return (
-    <span
-      className={`inline-block rounded border px-2 py-0.5 text-xs ${AVAILABILITY_CLS[status]}`}
-    >
+    <Badge variant="outline" className={AVAILABILITY_CLS[status]}>
       {AVAILABILITY_TEXT[status]}
-    </span>
+    </Badge>
   );
 }
 
@@ -73,16 +73,9 @@ export function TaskStatusBadge({
     ? "border border-dashed border-warn bg-warn/10 text-warn"
     : TASK_STATUS_CLS[status];
   return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-xs font-medium ${cls}`}
-    >
-      {status === "running" ? (
-        <span
-          aria-hidden
-          className="live-dot"
-        />
-      ) : null}
+    <Badge variant="outline" className={`gap-1.5 ${cls}`}>
+      {status === "running" ? <span aria-hidden className="live-dot" /> : null}
       {TASK_STATUS_TEXT[status]}
-    </span>
+    </Badge>
   );
 }

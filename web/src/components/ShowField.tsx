@@ -1,8 +1,13 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+
 import { useEffect, useRef, useState } from "react";
 
 import { extractDamaiItemId } from "@core/damai/itemId";
+import type { ShowDetail } from "@core/damai/showDetail";
 
 import { readCurrentShow, resolveShareShow } from "@/app/show/actions";
 
@@ -23,11 +28,17 @@ export function ShowField({
 }) {
   const [shareText, setShareText] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [detail, setDetail] = useState<ShowDetail | null>(null);
   const [reading, setReading] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [manual, setManual] = useState(false);
   const onChangeRef = useRef(onItemIdChange);
   onChangeRef.current = onItemIdChange;
+
+  const selectShow = (nextItemId: string, nextDetail: ShowDetail | null): void => {
+    onChangeRef.current(nextItemId);
+    setDetail(nextDetail);
+  };
 
   useEffect(() => {
     const trimmed = shareText.trim();
@@ -37,7 +48,7 @@ export function ShowField({
     }
     const direct = extractDamaiItemId(trimmed);
     if (direct !== null) {
-      onChangeRef.current(direct);
+      selectShow(direct, null);
       setMessage("已从分享内容识别演出。");
       setResolving(false);
       return;
@@ -57,9 +68,9 @@ export function ShowField({
         if (result.serverError) {
           setMessage(result.serverError);
           setManual(true);
-        } else if (result.data) {
+        } else         if (result.data) {
           if (result.data.itemId !== null) {
-            onChangeRef.current(result.data.itemId);
+            selectShow(result.data.itemId, null);
           } else {
             setManual(true);
           }
@@ -89,7 +100,7 @@ export function ShowField({
       return;
     }
     if (result.data?.itemId) {
-      onChangeRef.current(result.data.itemId);
+      selectShow(result.data.itemId, result.data.detail);
       setMessage(result.data.message);
       return;
     }
@@ -106,42 +117,73 @@ export function ShowField({
         </p>
       </div>
 
-      <button
+      <Button
         type="button"
         onClick={() => void readFromPhone()}
         disabled={reading}
-        className="btn btn-secondary px-3 py-1.5 text-xs"
+        variant="outline" size="sm"
       >
         {reading ? "正在读取手机…" : "读取手机当前演出"}
-      </button>
+      </Button>
 
       <div>
         <label htmlFor="show-share" className="block text-xs font-medium text-muted">
           分享内容
         </label>
-        <textarea
+        <Textarea
           id="show-share"
           value={shareText}
           onChange={(event) => setShareText(event.target.value)}
           rows={3}
           placeholder="粘贴大麦分享的文字或链接"
-          className="field mt-1 text-xs"
+          className="mt-1 text-xs"
         />
         {resolving ? <p className="mt-1 text-[11px] text-muted">正在从链接识别…</p> : null}
       </div>
 
       {itemId !== "" ? (
-        <div className="flex items-center justify-between gap-2 rounded border border-ok/30 bg-ok/10 px-3 py-2">
-          <p className="text-xs text-ink">
-            已选定演出 <span className="font-mono">{itemId}</span>
-          </p>
-          <button
-            type="button"
-            onClick={() => onItemIdChange("")}
-            className="text-[11px] text-muted hover:text-ink"
-          >
-            清除
-          </button>
+        <div className="rounded border border-ok/30 bg-ok/10 px-3 py-2">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              {detail?.category ? <p className="text-[11px] text-muted">{detail.category}</p> : null}
+              <p className="text-xs font-medium text-ink">{detail?.title ?? "已选定演出"}</p>
+              {detail?.time ? <p className="mt-0.5 text-[11px] text-muted">{detail.time}</p> : null}
+              {detail?.price ? <p className="mt-0.5 text-xs text-ink">{detail.price}</p> : null}
+              {detail?.venue ? <p className="mt-0.5 text-[11px] text-ink">{detail.venue}</p> : null}
+              {detail?.address ? <p className="text-[11px] text-muted">{detail.address}</p> : null}
+            </div>
+            <Button
+              type="button"
+              variant="link"
+              size="xs"
+              onClick={() => selectShow("", null)}
+              className="h-auto shrink-0 px-0 text-[11px] text-muted"
+            >
+              清除
+            </Button>
+          </div>
+          {detail && detail.cities.length > 0 ? (
+            <ul className="mt-2 flex flex-wrap gap-1.5">
+              {detail.cities.map((city) => (
+                <li
+                  key={city.name}
+                  className={
+                    city.selected
+                      ? "rounded border border-ink/30 bg-surface px-2 py-1 text-[11px] text-ink"
+                      : "rounded border border-transparent px-2 py-1 text-[11px] text-muted"
+                  }
+                >
+                  {city.name}
+                  {city.state ? ` ${city.state}` : ""}
+                  {city.time ? ` ${city.time}` : ""}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {detail && detail.notices.length > 0 ? (
+            <p className="mt-2 text-[11px] text-muted">{detail.notices.join(" · ")}</p>
+          ) : null}
+          <p className="mt-1 font-mono text-[11px] text-muted">{itemId}</p>
         </div>
       ) : (
         <p className="text-[11px] text-muted">还没选定演出。</p>
@@ -155,22 +197,24 @@ export function ShowField({
           <label htmlFor="show-item-id" className="block text-xs font-medium text-muted">
             演出编号
           </label>
-          <input
+          <Input
             id="show-item-id"
             value={itemId}
-            onChange={(event) => onItemIdChange(event.target.value.trim())}
+            onChange={(event) => selectShow(event.target.value.trim(), null)}
             placeholder="读取或粘贴失败时，在这里填写"
-            className="field mt-1 font-mono text-xs"
+            className="mt-1 font-mono text-xs"
           />
         </div>
       ) : (
-        <button
+        <Button
           type="button"
+          variant="link"
+          size="xs"
           onClick={() => setManual(true)}
-          className="text-[11px] text-muted underline-offset-2 hover:text-ink hover:underline"
+          className="h-auto px-0 text-[11px] text-muted"
         >
           直接填写编号
-        </button>
+        </Button>
       )}
     </div>
   );

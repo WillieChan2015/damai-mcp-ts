@@ -1,5 +1,9 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
@@ -42,7 +46,7 @@ export function ConnectForm() {
   };
 
   return (
-    <div className="panel p-5 space-y-4">
+    <Card className="p-5 space-y-4">
       <div>
         <h2 className="text-sm font-semibold text-ink">添加网络模拟器 / 无线设备</h2>
         <p className="mt-0.5 text-xs text-muted">
@@ -52,38 +56,40 @@ export function ConnectForm() {
 
       <form onSubmit={onSubmit} className="flex flex-col gap-3 sm:flex-row sm:items-start">
         <div className="flex-1">
-          <input
+          <Input
             {...form.register("hostPort")}
             placeholder="如 127.0.0.1:5555 或网络 host:port"
-            className="field font-mono text-xs"
+            className="font-mono text-xs"
           />
           {form.formState.errors.hostPort ? (
             <p className="mt-1 text-xs text-danger">{form.formState.errors.hostPort.message}</p>
           ) : null}
           {error ? <p className="mt-1 text-xs text-danger">{error}</p> : null}
         </div>
-        <button
+        <Button
           type="submit"
           disabled={isPending || form.formState.isSubmitting}
-          className="btn btn-primary px-4 py-2 text-xs shrink-0"
+          size="sm" className="shrink-0"
         >
           {form.formState.isSubmitting ? "正在建立 ADB 连接…" : "连接设备"}
-        </button>
+        </Button>
       </form>
 
       <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-line">
         <span className="text-[11px] text-muted">常见模拟器预设端口：</span>
         {PRESET_PORTS.map((p) => (
-          <button
+          <Button
             key={p.host}
             type="button"
+            variant="outline"
+            size="xs"
             onClick={() => setPreset(p.host)}
-            className="rounded border border-line bg-surface-raised px-2 py-0.5 font-mono text-[11px] text-muted hover:border-line-strong hover:text-ink transition-colors"
+            className="font-mono"
           >
             {p.label}
-          </button>
+          </Button>
         ))}
       </div>
-    </div>
+    </Card>
   );
 }

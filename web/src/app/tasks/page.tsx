@@ -1,8 +1,9 @@
 import { DeviceManager } from "@core/device/manager";
+import { loadViewerPresets } from "@/lib/viewerPresets";
 import { getTaskManager } from "@/task/manager";
 
 import { TaskPanel } from "./TaskPanel";
-import { PageHeader } from "@/components/ui";
+import { PageHeader } from "@/components/console";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,11 @@ export default async function TasksPage() {
         title="抢票任务作战舱"
         lede="全流程六阶门控：NTP 校时 → 详情页预热 → 开票去抖门 → 锁定票档 → 选中观演人 → 交付人工核验与支付。"
       />
-      <TaskPanel initialTasks={manager.list()} devices={devices} />
+      <TaskPanel
+        initialTasks={manager.list()}
+        devices={devices}
+        viewerPresets={loadViewerPresets()}
+      />
     </div>
   );
 }

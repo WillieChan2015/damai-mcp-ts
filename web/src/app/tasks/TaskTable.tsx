@@ -7,16 +7,17 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 
+import { Badge } from "@/components/ui/badge";
 import type { TaskSnapshot } from "@/task/manager";
 
 const helper = createColumnHelper<TaskSnapshot>();
 
 const STATUS_CLS: Record<string, string> = {
-  running: "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
-  cancelling: "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
-  cancelled: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
-  succeeded: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
-  failed: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
+  running: "border-info/30 bg-info/10 text-info",
+  cancelling: "border-warn/30 bg-warn/10 text-warn",
+  cancelled: "border-line bg-secondary text-muted",
+  succeeded: "border-ok/30 bg-ok/10 text-ok",
+  failed: "border-danger/30 bg-danger/10 text-danger",
 };
 
 const STATUS_TEXT: Record<string, string> = {
@@ -46,14 +47,10 @@ const columns = [
   helper.accessor("status", {
     header: "状态",
     cell: (info) => (
-      <span
-        className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${
-          STATUS_CLS[info.getValue()] ?? ""
-        }`}
-      >
+      <Badge variant="outline" className={STATUS_CLS[info.getValue()] ?? ""}>
         {STATUS_TEXT[info.getValue()] ?? info.getValue()}
         {info.row.original.unresponsive ? "（未响应）" : ""}
-      </span>
+      </Badge>
     ),
   }),
 ];

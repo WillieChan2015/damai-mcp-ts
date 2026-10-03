@@ -2,7 +2,7 @@ import { getAiSettingsStatus } from "@/lib/aiConfig";
 
 import { ChatPanel } from "./ChatPanel";
 import { SettingsForm } from "./SettingsForm";
-import { PageHeader } from "@/components/ui";
+import { PageHeader } from "@/components/console";
 
 export const dynamic = "force-dynamic";
 

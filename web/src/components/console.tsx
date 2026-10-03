@@ -1,5 +1,7 @@
-import type { ReactNode } from "react";
 import Link from "next/link";
+import type { ReactNode } from "react";
+
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export type GlyphName =
   | "devices"
@@ -157,33 +159,6 @@ export function PageHeader({
   );
 }
 
-/** 语义状态徽标（无圆角药丸默认 tell，保持专业工具质感）。 */
-export function Badge({
-  variant = "neutral",
-  children,
-  className,
-}: {
-  variant?: "ok" | "warn" | "danger" | "info" | "neutral";
-  children: ReactNode;
-  className?: string;
-}) {
-  const styles: Record<string, string> = {
-    ok: "border-ok/30 bg-ok/10 text-ok",
-    warn: "border-warn/30 bg-warn/10 text-warn",
-    danger: "border-danger/30 bg-danger/10 text-danger",
-    info: "border-info/30 bg-info/10 text-info",
-    neutral: "border-line bg-surface-raised text-muted",
-  };
-
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-xs font-medium tabular-nums ${styles[variant]} ${className ?? ""}`}
-    >
-      {children}
-    </span>
-  );
-}
-
 /** 战备状态指标卡。传入 href 时整张卡跳转到对应页面。 */
 export function MetricCard({
   title,
@@ -200,9 +175,9 @@ export function MetricCard({
   active?: boolean;
   href?: string;
 }) {
-  const className = `panel block p-4 transition-colors ${
+  const className = `block p-4 transition-colors ${
     href ? "hover:border-ink/30 hover:bg-surface-raised" : ""
-  } ${active ? "border-ink/40 bg-surface" : "bg-surface"}`;
+  } ${active ? "border-ink/40" : ""}`;
   const content = (
     <>
       <div className="flex items-center justify-between text-muted">
@@ -215,15 +190,17 @@ export function MetricCard({
   );
   if (href) {
     return (
-      <Link href={href} className={className}>
-        {content}
-      </Link>
+      <Card className={className}>
+        <Link href={href} className="block">
+          {content}
+        </Link>
+      </Card>
     );
   }
-  return <div className={className}>{content}</div>;
+  return <Card className={className}>{content}</Card>;
 }
 
-/** 面板：线框、无阴影；带标题时标题与内容用细线分隔。 */
+/** 面板：shadcn Card，标题与内容用细线分隔。 */
 export function Panel({
   title,
   actions,
@@ -236,14 +213,14 @@ export function Panel({
   className?: string;
 }) {
   return (
-    <section className={`panel overflow-hidden ${className ?? ""}`}>
+    <Card className={className}>
       {title ? (
-        <div className="flex items-center justify-between border-b border-line px-5 py-3">
-          <h2 className="text-sm font-semibold text-ink">{title}</h2>
-          {actions}
-        </div>
+        <CardHeader className="flex-row items-center justify-between border-b border-line">
+          <CardTitle className="text-sm font-semibold text-ink">{title}</CardTitle>
+          {actions ? <CardAction>{actions}</CardAction> : null}
+        </CardHeader>
       ) : null}
-      <div className="p-5">{children}</div>
-    </section>
+      <CardContent className={title ? undefined : "p-5"}>{children}</CardContent>
+    </Card>
   );
 }

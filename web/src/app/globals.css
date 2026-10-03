@@ -1,4 +1,10 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+/*
+ ---break---
+ */
+@custom-variant dark (&:is(.dark *));
 
 /*
  * 「开演前的指挥台」设计令牌
@@ -20,6 +26,32 @@
   --danger: #be123c;
   --info: #1d5ec9;
   --radius-panel: 10px;
+  /* shadcn 语义色接到指挥台令牌，不覆盖 --accent / --muted */
+  --background: var(--paper);
+  --foreground: var(--ink);
+  --card: var(--surface);
+  --card-foreground: var(--ink);
+  --popover: var(--surface);
+  --popover-foreground: var(--ink);
+  --primary: var(--ink);
+  --primary-foreground: var(--paper);
+  --secondary: var(--surface-raised);
+  --secondary-foreground: var(--ink);
+  --muted-foreground: var(--muted);
+  --accent-foreground: var(--ink);
+  --destructive: var(--danger);
+  --border: var(--line);
+  --input: var(--line-strong);
+  --ring: var(--accent);
+  --radius: 10px;
+  --sidebar: var(--surface);
+  --sidebar-foreground: var(--ink);
+  --sidebar-primary: var(--ink);
+  --sidebar-primary-foreground: var(--paper);
+  --sidebar-accent: var(--surface-raised);
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: var(--line);
+  --sidebar-ring: var(--accent);
   color-scheme: light;
 }
 
@@ -73,6 +105,43 @@
     "Microsoft YaHei", sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace;
   --font-display: var(--font-display-serif), "Songti SC", "SimSun", serif;
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
 @layer base {
@@ -83,6 +152,7 @@
     font-size: 14px;
     line-height: 1.7;
     -webkit-font-smoothing: antialiased;
+    @apply bg-background text-foreground;
   }
 
   ::selection {
@@ -95,89 +165,21 @@
     outline-offset: 2px;
   }
 
-  /* 表单控件全局一致：页面里不再各写一遍边框/圆角/聚焦 */
-  input,
-  select,
-  textarea {
-    width: 100%;
-    border: 1px solid var(--line-strong);
-    border-radius: 8px;
-    background: var(--surface);
-    color: var(--ink);
-    padding: 8px 12px;
-    font-size: 13px;
-    font-family: inherit;
-    transition: border-color 0.15s ease;
-  }
-  input:focus,
-  select:focus,
-  textarea:focus {
-    border-color: var(--accent);
-    outline: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
-    outline-offset: 1px;
-  }
-  input::placeholder,
-  textarea::placeholder {
-    color: color-mix(in srgb, var(--muted) 70%, transparent);
-  }
-
   table {
     font-variant-numeric: tabular-nums;
+  }
+  * {
+    @apply border-border outline-ring/50;
+  }
+  button:not(:disabled), [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  html {
+    @apply font-sans;
   }
 }
 
 @layer components {
-  /* 面板：线框 + 无阴影（与 SaaS 卡片组划清界限） */
-  .panel {
-    border: 1px solid var(--line);
-    border-radius: var(--radius-panel);
-    background: var(--surface);
-  }
-
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    padding: 8px 16px;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition:
-      background 0.15s ease,
-      border-color 0.15s ease;
-  }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .btn-primary {
-    background: var(--ink);
-    color: var(--paper);
-  }
-  .btn-primary:hover:enabled {
-    background: var(--accent);
-  }
-  .btn-secondary {
-    background: var(--surface);
-    border-color: var(--line-strong);
-    color: var(--ink);
-  }
-  .btn-secondary:hover:enabled {
-    background: var(--surface-raised);
-    border-color: var(--ink);
-  }
-  .btn-danger {
-    background: transparent;
-    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
-    color: var(--danger);
-  }
-  .btn-danger:hover:enabled {
-    background: color-mix(in srgb, var(--danger) 10%, transparent);
-  }
-
   /* 票根打孔分隔线：唯一的装饰母题，只用于纸面底色区域 */
   .perforation {
     position: relative;

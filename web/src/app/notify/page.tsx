@@ -3,7 +3,7 @@ import { NOTIFY_CREDENTIALS_FILE_DEFAULT } from "@core/notify/credentials";
 import { NotifyStatusCard } from "./NotifyStatusCard";
 import { SendTestForm } from "./SendTestForm";
 import { loadNotifyStatusSnapshot } from "./notifyConfig";
-import { PageHeader } from "@/components/ui";
+import { PageHeader } from "@/components/console";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +29,7 @@ export default async function NotifyPage() {
       <NotifyStatusCard snapshot={snapshot} />
       <SendTestForm ready={snapshot.ready} />
 
-      <details className="panel p-6">
+      <details className="rounded-[10px] border border-line bg-card p-6">
         <summary className="cursor-pointer text-base font-semibold text-ink">
           绑定指引
         </summary>

@@ -1,5 +1,10 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+
 import { useActionState } from "react";
 
 import type { SendStatus } from "@core/notify/wechat";
@@ -104,8 +109,6 @@ function ResultCard({ outcome }: { outcome: SendTestResult }) {
   );
 }
 
-const inputCls =
-  "field";
 const labelCls = "block text-xs font-medium text-zinc-600 dark:text-zinc-400";
 
 /**
@@ -143,7 +146,7 @@ export function SendTestForm({ ready }: { ready: boolean }) {
   );
 
   return (
-    <section className="panel p-6">
+    <Card className="p-6">
       <h2 className="text-base font-semibold text-ink">测试发送</h2>
       <p className="mt-1 text-sm text-muted">
         {ready
@@ -155,19 +158,19 @@ export function SendTestForm({ ready }: { ready: boolean }) {
           <label className={labelCls} htmlFor="notify-target">
             接收人 target（ClawBot to_user_id，必填）
           </label>
-          <input
+          <Input
             id="notify-target"
             name="target"
             placeholder="user-001"
             autoComplete="off"
-            className={`mt-1 ${inputCls}`}
+            className="mt-1"
           />
         </div>
         <div>
           <label className={labelCls} htmlFor="notify-text">
             文本内容（留空 = 固定测试文案；≤ 2000 字）
           </label>
-          <textarea id="notify-text" name="text" rows={3} className={`mt-1 ${inputCls}`} />
+          <Textarea id="notify-text" name="text" rows={3} className="mt-1" />
         </div>
 
         <details className="rounded-lg border border-line bg-surface-raised p-3">
@@ -179,36 +182,36 @@ export function SendTestForm({ ready }: { ready: boolean }) {
               <label className={labelCls} htmlFor="notify-origin">
                 origin（https，host ∈ *.ilinkai.weixin.qq.com）
               </label>
-              <input
+              <Input
                 id="notify-origin"
                 name="origin"
                 placeholder="https://bot.ilinkai.weixin.qq.com"
                 autoComplete="off"
-                className={`mt-1 ${inputCls}`}
+                className="mt-1"
               />
             </div>
             <div>
               <label className={labelCls} htmlFor="notify-token">
                 token（Bearer 令牌）
               </label>
-              <input
+              <Input
                 id="notify-token"
                 name="token"
                 type="password"
                 autoComplete="off"
-                className={`mt-1 ${inputCls}`}
+                className="mt-1"
               />
             </div>
             <div>
               <label className={labelCls} htmlFor="notify-context-token">
                 context_token（会话上下文）
               </label>
-              <input
+              <Input
                 id="notify-context-token"
                 name="contextToken"
                 type="password"
                 autoComplete="off"
-                className={`mt-1 ${inputCls}`}
+                className="mt-1"
               />
             </div>
           </div>
@@ -228,13 +231,13 @@ export function SendTestForm({ ready }: { ready: boolean }) {
         ) : null}
 
         <div>
-          <button
+          <Button
             type="submit"
             disabled={pending}
-            className="btn btn-primary w-full px-4 py-2.5"
+            className="w-full"
           >
             {pending ? "发送中…" : "发送测试通知"}
-          </button>
+          </Button>
           <p className="mt-2 text-xs text-zinc-400">
             单次请求超时 10 秒；超时＝送达状态未知，不会自动重发（可按结果里的 client_id 幂等重试）。
           </p>
@@ -242,6 +245,6 @@ export function SendTestForm({ ready }: { ready: boolean }) {
 
         {state.outcome !== null ? <ResultCard outcome={state.outcome} /> : null}
       </form>
-    </section>
+    </Card>
   );
 }

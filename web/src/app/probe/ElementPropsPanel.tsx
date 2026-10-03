@@ -1,5 +1,6 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
 import { useState } from "react";
 import { formatBounds, probeElementToString, type ProbeElement } from "./tree";
 
@@ -73,13 +74,15 @@ export function ElementPropsPanel({
       <div className="rounded-lg border border-line bg-surface-raised p-3">
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-medium text-muted">XPath 引用建议</span>
-          <button
+          <Button
             type="button"
+            variant="outline"
+            size="xs"
             onClick={() => copyText(xpathSuggestion, "xpath")}
-            className="rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[11px] text-muted hover:text-ink"
+            className="font-mono"
           >
             {copiedKey === "xpath" ? "已复制" : "复制 XPath"}
-          </button>
+          </Button>
         </div>
         <div className="mt-1.5 font-mono text-xs text-accent break-all select-all">
           {xpathSuggestion}

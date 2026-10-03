@@ -1,8 +1,10 @@
 "use client";
 
+import { DeviceSelect } from "@/components/DeviceSelect";
+
 import { useState } from "react";
 
-import { deviceChoiceLabel, type DeviceIdentity } from "@/lib/deviceLabel";
+import { type DeviceIdentity } from "@/lib/deviceLabel";
 
 import { FindTextForm } from "./FindTextForm";
 import { UiTreePanel } from "./UiTreePanel";
@@ -13,8 +15,6 @@ export interface ProbeDeviceOption extends DeviceIdentity {
   model: string;
 }
 
-const SELECT_CLS =
-  "field";
 
 /**
  * 调试器工作区：共享设备下拉 + 两个工具卡（Dump 树查看 / find_text 试查）。
@@ -41,17 +41,12 @@ export function ProbeWorkspace({ devices }: { devices: ProbeDeviceOption[] }) {
           <label className="block text-xs font-medium text-ink">当前调试目标设备</label>
           <p className="text-[11px] text-muted">切换设备后工作区与 Dump 树将自动刷新</p>
         </div>
-        <select
+        <DeviceSelect
+          devices={devices}
           value={deviceId}
-          onChange={(e) => setDeviceId(e.target.value)}
-          className="field max-w-md text-xs"
-        >
-          {devices.map((d) => (
-            <option key={d.deviceId} value={d.deviceId}>
-              {deviceChoiceLabel(d)}
-            </option>
-          ))}
-        </select>
+          onValueChange={setDeviceId}
+          className="max-w-md text-xs"
+        />
       </div>
 
       {deviceId !== "" ? (

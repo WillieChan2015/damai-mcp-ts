@@ -1,5 +1,8 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+
 import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
@@ -10,7 +13,7 @@ import { cancelTask } from "./actions";
 import { ProgressViewer } from "./ProgressViewer";
 import { TaskForm, type TaskFormDevice } from "./TaskForm";
 import { TaskTable } from "./TaskTable";
-import { Glyph, Panel } from "@/components/ui";
+import { Glyph, Panel } from "@/components/console";
 
 /**
  * 抢票任务双栏作战舱面板：
@@ -21,9 +24,11 @@ import { Glyph, Panel } from "@/components/ui";
 export function TaskPanel({
   initialTasks,
   devices = [],
+  viewerPresets = [],
 }: {
   initialTasks: TaskSnapshot[];
   devices?: TaskFormDevice[];
+  viewerPresets?: string[];
 }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -89,6 +94,7 @@ export function TaskPanel({
           >
             <TaskForm
               devices={devices}
+              viewerPresets={viewerPresets}
               onStarted={(newId) => {
                 setSelectedId(newId);
               }}
@@ -108,14 +114,14 @@ export function TaskPanel({
               selectedTask ? (
                 <div className="flex items-center gap-2">
                   {isCancellable ? (
-                    <button
+                    <Button
                       type="button"
                       onClick={() => onCancel(selectedTask.id)}
                       disabled={isPending}
-                      className="btn btn-danger px-2.5 py-1 text-xs"
+                      variant="destructive" size="xs"
                     >
                       {isPending ? "取消中…" : "中止任务"}
-                    </button>
+                    </Button>
                   ) : null}
                 </div>
               ) : undefined
@@ -132,7 +138,7 @@ export function TaskPanel({
       </div>
 
       {/* 底部：历史任务审计与调阅 */}
-      <section className="panel overflow-hidden">
+      <Card className="overflow-hidden">
         <div className="flex items-center justify-between border-b border-line px-5 py-3">
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold text-ink">任务审计总表</h2>
@@ -153,7 +159,7 @@ export function TaskPanel({
             </div>
           )}
         </div>
-      </section>
+      </Card>
     </div>
   );
 }

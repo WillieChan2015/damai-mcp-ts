@@ -1,8 +1,9 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useTransition } from "react";
-import { useState } from "react";
+import { useState, useTransition } from "react";
+
+import { Button } from "@/components/ui/button";
 
 import { disconnectDevice } from "./actions";
 
@@ -26,14 +27,16 @@ export function DisconnectButton({ deviceId }: { deviceId: string }) {
 
   return (
     <span className="inline-flex flex-col items-end">
-      <button
+      <Button
         type="button"
+        variant="link"
+        size="xs"
         onClick={onDisconnect}
         disabled={isPending}
-        className="text-xs text-red-600 hover:underline disabled:opacity-50"
+        className="h-auto px-0 text-xs text-destructive"
       >
         {isPending ? "断开中…" : "断开"}
-      </button>
+      </Button>
       {error ? <span className="text-xs text-red-600">{error}</span> : null}
     </span>
   );

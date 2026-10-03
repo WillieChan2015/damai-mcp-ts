@@ -1,5 +1,9 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
@@ -9,8 +13,6 @@ import { ElementPropsPanel } from "./ElementPropsPanel";
 import { findTextFormSchema } from "./schemas";
 import type { ProbeFindResult } from "./tree";
 
-const INPUT_CLS =
-  "mt-1 field";
 const LABEL_CLS = "block text-xs font-medium text-zinc-600 dark:text-zinc-400";
 
 /**
@@ -48,7 +50,7 @@ export function FindTextForm({ deviceId }: { deviceId: string }) {
   const submitting = form.formState.isSubmitting;
 
   return (
-    <section className="panel p-5 space-y-4">
+    <Card className="p-5 space-y-4">
       <div>
         <h2 className="text-sm font-semibold text-ink">快速文本控件试查 (find_text)</h2>
         <p className="mt-0.5 text-xs text-muted">
@@ -59,10 +61,10 @@ export function FindTextForm({ deviceId }: { deviceId: string }) {
       <form onSubmit={onSubmit} className="grid gap-3 sm:grid-cols-2">
         <div className="sm:col-span-2">
           <label className="block text-xs font-medium text-muted">查找文本（匹配 text 或 content-desc）</label>
-          <input
+          <Input
             {...form.register("text")}
             placeholder="如：立即购买 / 选座 / 确定"
-            className="field mt-1"
+            className="mt-1"
           />
           {form.formState.errors.text ? (
             <p className="mt-1 text-xs text-danger">{form.formState.errors.text.message}</p>
@@ -82,12 +84,12 @@ export function FindTextForm({ deviceId }: { deviceId: string }) {
 
         <div>
           <label className="block text-xs font-medium text-muted">超时等待（秒）</label>
-          <input
+          <Input
             type="number"
             min={1}
             max={30}
             {...form.register("timeoutSec", { valueAsNumber: true })}
-            className="field mt-1 font-mono text-xs"
+            className="mt-1 font-mono text-xs"
           />
           {form.formState.errors.timeoutSec ? (
             <p className="mt-1 text-xs text-danger">
@@ -97,13 +99,13 @@ export function FindTextForm({ deviceId }: { deviceId: string }) {
         </div>
 
         <div className="flex items-end">
-          <button
+          <Button
             type="submit"
             disabled={submitting}
-            className="btn btn-secondary w-full py-2 text-xs"
+            variant="outline" className="w-full"
           >
             {submitting ? "正在轮询查找中…" : "开始定位测试"}
-          </button>
+          </Button>
         </div>
       </form>
 
@@ -136,6 +138,6 @@ export function FindTextForm({ deviceId }: { deviceId: string }) {
           </div>
         )
       ) : null}
-    </section>
+    </Card>
   );
 }

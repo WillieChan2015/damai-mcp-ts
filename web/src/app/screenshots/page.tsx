@@ -1,3 +1,4 @@
+import { Card } from "@/components/ui/card";
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -6,7 +7,7 @@ import { DeviceManager } from "@core/device/manager";
 import { resolveShotsDir, shotsDirCandidates } from "@/lib/paths";
 
 import { ScreenshotPreview } from "./ScreenshotPreview";
-import { PageHeader } from "@/components/ui";
+import { PageHeader } from "@/components/console";
 
 export const dynamic = "force-dynamic";
 
@@ -75,13 +76,13 @@ export default async function ScreenshotsPage() {
         <PageHeader title="截图墙" lede="上方为设备实时画面（2s 轮询）；下方为抢票流程自动保存的失败现场截图（最新在前，最多 200 张）。" />
       </div>
 
-      <div className="panel p-5">
+      <Card className="p-5">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-semibold text-ink">在线设备实时视窗 (2s 轮询)</h2>
           <span className="font-mono text-xs text-muted">/api/devices/[id]/screenshot</span>
         </div>
         <ScreenshotPreview devices={devices} />
-      </div>
+      </Card>
 
       <section className="space-y-3">
         <div className="flex items-center justify-between px-1">

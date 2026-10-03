@@ -1,5 +1,7 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
+
 import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
@@ -121,14 +123,14 @@ function MonitorTaskRow({ task }: { task: TaskSnapshot }) {
       <td className="py-2">
         {live ? (
           <>
-            <button
+            <Button
               type="button"
               onClick={onCancel}
               disabled={isPending}
-              className="btn btn-danger px-3 py-1.5 text-xs"
+              variant="destructive" size="xs"
             >
               取消
-            </button>
+            </Button>
             {cancelError ? <p className="mt-1 text-xs text-red-600">{cancelError}</p> : null}
           </>
         ) : null}

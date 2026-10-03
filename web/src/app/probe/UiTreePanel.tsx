@@ -1,5 +1,10 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+
 import { useState } from "react";
 
 import { dumpDeviceUi } from "./actions";
@@ -62,7 +67,7 @@ export function UiTreePanel({ deviceId }: { deviceId: string }) {
   const nodeCount = dump !== null ? countTreeNodes(tree) : 0;
 
   return (
-    <section className="panel overflow-hidden">
+    <Card className="overflow-hidden">
       {/* 顶部控制栏 */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-5 py-3">
         <div className="flex items-center gap-3">
@@ -79,14 +84,14 @@ export function UiTreePanel({ deviceId }: { deviceId: string }) {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
+          <Button
             type="button"
             onClick={handleDump}
             disabled={loading}
-            className="btn btn-primary px-3 py-1.5 text-xs"
+            size="sm"
           >
             {loading ? "正在抓取 UI（约需 5~15s）…" : "Dump 当前界面"}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -112,38 +117,32 @@ export function UiTreePanel({ deviceId }: { deviceId: string }) {
               </div>
 
               <div className="flex items-center gap-2">
-                <input
+                <Input
                   type="text"
                   value={filterText}
                   onChange={(e) => setFilterText(e.target.value)}
                   placeholder="过滤类名 / 文本 / ID…"
-                  className="field py-1 text-xs max-w-xs"
+                  className="py-1 text-xs max-w-xs"
                 />
 
-                <div className="flex rounded border border-line p-0.5">
-                  <button
-                    type="button"
-                    onClick={() => setView("tree")}
-                    className={`rounded px-2 py-0.5 text-xs transition-colors ${
-                      view === "tree"
-                        ? "bg-surface text-ink font-semibold shadow-xs"
-                        : "text-muted hover:text-ink"
-                    }`}
-                  >
+                <ToggleGroup
+                  type="single"
+                  value={view}
+                  onValueChange={(next) => {
+                    if (next === "tree" || next === "flat") setView(next);
+                  }}
+                  size="sm"
+                  spacing={0}
+                  aria-label="结构视图"
+                  className="rounded border border-line p-0.5"
+                >
+                  <ToggleGroupItem value="tree" className="h-6 px-2 text-xs">
                     树形视图
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setView("flat")}
-                    className={`rounded px-2 py-0.5 text-xs transition-colors ${
-                      view === "flat"
-                        ? "bg-surface text-ink font-semibold shadow-xs"
-                        : "text-muted hover:text-ink"
-                    }`}
-                  >
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="flat" className="h-6 px-2 text-xs">
                     平铺表格
-                  </button>
-                </div>
+                  </ToggleGroupItem>
+                </ToggleGroup>
               </div>
             </div>
 
@@ -214,6 +213,6 @@ export function UiTreePanel({ deviceId }: { deviceId: string }) {
           </div>
         )}
       </div>
-    </section>
+    </Card>
   );
 }

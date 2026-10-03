@@ -1,3 +1,4 @@
+import { Card } from "@/components/ui/card";
 import type { NotifyFieldStatus, NotifyStatusSnapshot } from "./notifyConfig";
 
 /** 来源 → 中文标注。 */
@@ -31,7 +32,7 @@ function FieldRow({ label, status }: { label: string; status: NotifyFieldStatus 
  */
 export function NotifyStatusCard({ snapshot }: { snapshot: NotifyStatusSnapshot }) {
   return (
-    <section className="panel p-6 space-y-4">
+    <Card className="p-6 space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-base font-semibold text-ink">配置完整性检查</h2>
         <span className="font-mono text-xs text-muted">ClawBot 三要素</span>
@@ -53,6 +54,6 @@ export function NotifyStatusCard({ snapshot }: { snapshot: NotifyStatusSnapshot 
           配置未齐备：可展开下方高级选项手填凭证完成单次测试发送（不持久化），或参考下方指引完成环境配置。
         </div>
       )}
-    </section>
+    </Card>
   );
 }

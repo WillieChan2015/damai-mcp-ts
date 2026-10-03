@@ -1,7 +1,7 @@
 import { DeviceManager } from "@core/device/manager";
 
 import { ProbeWorkspace, type ProbeDeviceOption } from "./ProbeWorkspace";
-import { PageHeader } from "@/components/ui";
+import { PageHeader } from "@/components/console";
 
 export const dynamic = "force-dynamic";
 

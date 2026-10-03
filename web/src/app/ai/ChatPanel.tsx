@@ -1,5 +1,9 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Textarea } from "@/components/ui/textarea";
+
 import { useChat } from "@ai-sdk/react";
 import {
   DefaultChatTransport,
@@ -149,7 +153,7 @@ export function ChatPanel({ configured }: { configured: boolean }) {
   };
 
   return (
-    <section className="panel overflow-hidden">
+    <Card className="overflow-hidden">
       {!configured ? (
         <div className="m-4 rounded-lg border border-warn/30 bg-warn/10 p-3 text-xs text-warn">
           尚未配置 AI 提供商。可直接在下方「Provider 设置」填入 Base URL、API Key 与 Model，或通过环境变量 DAMAI_AI_* 注入。
@@ -210,7 +214,7 @@ export function ChatPanel({ configured }: { configured: boolean }) {
       </div>
 
       <div className="border-t border-line bg-surface p-4">
-        <textarea
+        <Textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
@@ -221,7 +225,7 @@ export function ChatPanel({ configured }: { configured: boolean }) {
           }}
           rows={2}
           placeholder="向助手提问（Enter 发送，Shift+Enter 换行）…"
-          className="field resize-none text-xs"
+          className="resize-none text-xs"
         />
         <div className="mt-2.5 flex items-center justify-between">
           <p className="text-[11px] text-muted">
@@ -229,25 +233,25 @@ export function ChatPanel({ configured }: { configured: boolean }) {
           </p>
           <div className="flex gap-2">
             {busy ? (
-              <button
+              <Button
                 type="button"
                 onClick={() => chat.stop()}
-                className="btn btn-secondary px-3 py-1.5 text-xs"
+                variant="outline" size="sm"
               >
                 停止
-              </button>
+              </Button>
             ) : null}
-            <button
+            <Button
               type="button"
               onClick={submit}
               disabled={busy || input.trim() === ""}
-              className="btn btn-primary px-4 py-1.5 text-xs"
+              size="sm"
             >
               发送
-            </button>
+            </Button>
           </div>
         </div>
       </div>
-    </section>
+    </Card>
   );
 }

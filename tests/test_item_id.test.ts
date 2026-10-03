@@ -1,14 +1,27 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ADBError } from "../src/utils/errors";
 import { damaiUrl, extractDamaiItemId, resolveDamaiItemId } from "../src/damai/itemId";
-import { interpretActivityTopDump, readCurrentDamaiItem } from "../src/damai/readItem";
+import {
+  clearDetailItemCache,
+  extractDetailItemIdFromLog,
+  interpretActivityTopDump,
+  readCurrentDamaiItem,
+  rememberDetailItem,
+} from "../src/damai/readItem";
+
+process.env.DAMAI_DETAIL_ITEM_CACHE = join(tmpdir(), `damai-mcp-detail-item-test-${process.pid}.json`);
 
 const shellMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<string>>());
+const adbMock = vi.hoisted(() => vi.fn());
 const dumpUiMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/device/adb", () => ({
   shell: shellMock,
+  adb: adbMock,
 }));
 
 vi.mock("../src/inspector/dump", () => ({
@@ -16,6 +29,14 @@ vi.mock("../src/inspector/dump", () => ({
 }));
 
 const ITEM = "1063631004645";
+
+beforeEach(async () => {
+  adbMock.mockReset();
+  adbMock.mockResolvedValue({ stdout: "", stderr: "" });
+  dumpUiMock.mockReset();
+  dumpUiMock.mockResolvedValue([]);
+  await clearDetailItemCache();
+});
 
 afterEach(() => {
   shellMock.mockReset();
@@ -157,6 +178,18 @@ ACTIVITY MANAGER ACTIVITIES (dumpsys activity top)
   });
 });
 
+describe("extractDetailItemIdFromLog", () => {
+  it("取当前进程详情埋点里最后一条编号，丢掉别的进程", () => {
+    const log = `
+10-03 16:50:00.000 999 1 I x-n-x : updateEvent:{"args":{"item_id":"111111111111"},"pageName":"page_product_detail","key":"ProjectDetailActivity"}
+10-03 16:54:58.037 21334 27092 I x-n-x : updateEvent:{"args":{"item_id":"${ITEM}"},"pageName":"page_product_detail","key":"ProjectDetailActivity"}
+10-03 16:55:01.000 21334 1 I x-n-x : updateEvent:{"args":{"item_id":"222222222222"},"pageName":"page_home"}
+10-03 16:56:00.000 888 1 I x-n-x : updateEvent:{"args":{"item_id":"333333333333"},"pageName":"page_product_detail"}
+`;
+    expect(extractDetailItemIdFromLog(log, 21334)).toBe(ITEM);
+  });
+});
+
 describe("readCurrentDamaiItem", () => {
   it("activities 没有 Activity 段时改读 activity top", async () => {
     shellMock
@@ -172,6 +205,46 @@ describe("readCurrentDamaiItem", () => {
     expect(shellMock.mock.calls[0]?.slice(0, 3)).toEqual(["dumpsys", "activity", "activities"]);
     expect(shellMock.mock.calls[1]?.slice(0, 3)).toEqual(["dumpsys", "activity", "top"]);
     expect(dumpUiMock).not.toHaveBeenCalled();
+  });
+
+  it("详情 Intent 没有编号时读 logcat 里的 item_id", async () => {
+    shellMock
+      .mockResolvedValueOnce(
+        `* Hist #0: ActivityRecord{1 u0 cn.damai/.trade.newtradeorder.ui.projectdetail.ui.activity.ProjectDetailActivity t1}
+      app=ProcessRecord{abc 21334:cn.damai/u0a382}
+      Intent { dat=damai://projectdetail (has extras) }
+`,
+      )
+      .mockResolvedValueOnce("");
+    adbMock.mockResolvedValueOnce({
+      stdout: `10-03 16:54:58.037 21334 27092 I x-n-x : updateEvent:{"args":{"item_id":"${ITEM}"},"pageName":"page_product_detail","key":"ProjectDetailActivity"}`,
+      stderr: "",
+    });
+    await expect(readCurrentDamaiItem("serial")).resolves.toEqual({
+      foreground: true,
+      itemId: ITEM,
+    });
+    expect(adbMock.mock.calls[0]?.slice(0, 3)).toEqual(["logcat", "-d", "-e"]);
+    expect(dumpUiMock).toHaveBeenCalled();
+  });
+
+  it("日志被冲掉后，同一场详情 extras 仍能对上之前看到的编号", async () => {
+    await rememberDetailItem("serial", "25869c7", 21334, ITEM);
+    shellMock
+      .mockResolvedValueOnce(
+        `* Hist #0: ActivityRecord{1 u0 cn.damai/.trade.newtradeorder.ui.projectdetail.ui.activity.ProjectDetailActivity t1}
+      app=ProcessRecord{abc 21334:cn.damai/u0a382}
+      Intent { dat=damai://projectdetail (has extras) }
+`,
+      )
+      .mockResolvedValueOnce(
+        "mArguments=Bundle[{projectExtraData=cn.damai.trade.newtradeorder.ui.projectdetail.util.ProjectIntentExtraParser$ProjectDetailExtrasData@25869c7}]",
+      );
+    await expect(readCurrentDamaiItem("serial")).resolves.toEqual({
+      foreground: true,
+      itemId: ITEM,
+    });
+    expect(dumpUiMock).toHaveBeenCalled();
   });
 
   it("详情 Intent 没有编号时从界面文案里抽", async () => {

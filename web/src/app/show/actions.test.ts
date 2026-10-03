@@ -27,8 +27,29 @@ describe("readCurrentShow", () => {
     expect(result.serverError).toBeUndefined();
     expect(result.data).toEqual({
       itemId: "1063631004645",
+      detail: null,
       message: "已从手机当前页面识别演出。",
     });
+  });
+
+  it("详情字段随编号一起返回", async () => {
+    readMock.mockResolvedValueOnce({
+      foreground: true,
+      itemId: "1063631004645",
+      detail: {
+        title: "恒星之城",
+        category: "演唱会",
+        time: "2026.10.17-10.18",
+        price: "¥488–1688",
+        venue: "广东省奥林匹克体育中心体育场",
+        address: null,
+        cities: [],
+        notices: [],
+      },
+    });
+    const result = await readCurrentShow({ deviceId: "phone" });
+    expect(result.data?.detail?.title).toBe("恒星之城");
+    expect(result.data?.detail?.price).toBe("¥488–1688");
   });
 
   it("锁屏盖住详情时提示先解锁", async () => {

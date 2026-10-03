@@ -1,10 +1,11 @@
+import { Card } from "@/components/ui/card";
 import { DeviceManager } from "@core/device/manager";
 
 import { getTaskManager } from "@/task/manager";
 
 import { MonitorForm } from "./MonitorForm";
 import { MonitorTaskList } from "./MonitorTaskList";
-import { PageHeader } from "@/components/ui";
+import { PageHeader } from "@/components/console";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +30,7 @@ export default async function MonitorPage() {
         lede="只读轮询大麦详情页 DOM 节点，智能判定四态（有票 / 未开售 / 售罄 / 未知）；一旦发现回流余票立即停止并自动推送外链，全程零点击指令。"
       />
 
-      <section className="panel p-6">
+      <Card className="p-6">
         <h2 className="text-base font-semibold text-ink">新建监控任务</h2>
         <div className="mt-4">
           <MonitorForm
@@ -41,14 +42,14 @@ export default async function MonitorPage() {
             }))}
           />
         </div>
-      </section>
+      </Card>
 
-      <section className="panel p-6">
+      <Card className="p-6">
         <h2 className="text-base font-semibold text-ink">监控任务巡检列表</h2>
         <div className="mt-3">
           <MonitorTaskList initialTasks={initialTasks} />
         </div>
-      </section>
+      </Card>
     </div>
   );
 }

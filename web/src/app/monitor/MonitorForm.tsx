@@ -1,12 +1,17 @@
 "use client";
 
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useState } from "react";
-import { useForm } from "react-hook-form";
+import { Controller, useForm } from "react-hook-form";
 import { z } from "zod";
 
+import { DateTimeField } from "@/components/DateTimeField";
+import { DeviceSelect } from "@/components/DeviceSelect";
 import { ShowField } from "@/components/ShowField";
-import { deviceChoiceLabel, type DeviceIdentity } from "@/lib/deviceLabel";
+import { type DeviceIdentity } from "@/lib/deviceLabel";
 import { startMonitorTask } from "./actions";
 
 /** 表单下拉项（page.tsx 由 DeviceManager.listDevices 映射而来）。 */
@@ -71,9 +76,6 @@ export function MonitorForm({ devices }: { devices: MonitorDeviceOption[] }) {
       setStartedTaskId(result.data.taskId);
     }
   });
-
-  const inputCls =
-    "field";
   const labelCls = "block text-xs font-medium text-zinc-600 dark:text-zinc-400";
   const formError =
     form.formState.errors.deviceId?.message ?? form.formState.errors.intervalSeconds?.message;
@@ -82,14 +84,18 @@ export function MonitorForm({ devices }: { devices: MonitorDeviceOption[] }) {
     <form onSubmit={onSubmit} className="grid gap-3 sm:grid-cols-2">
       <div className="sm:col-span-2">
         <label className={labelCls}>设备（只读采样，不干扰人工操作）</label>
-        <select {...form.register("deviceId")} className={`mt-1 ${inputCls}`}>
-          <option value="">请选择设备</option>
-          {devices.map((d) => (
-            <option key={d.deviceId} value={d.deviceId}>
-              {deviceChoiceLabel(d)}
-            </option>
-          ))}
-        </select>
+        <Controller
+          control={form.control}
+          name="deviceId"
+          render={({ field }) => (
+            <DeviceSelect
+              devices={devices}
+              value={field.value}
+              onValueChange={field.onChange}
+              className="mt-1"
+            />
+          )}
+        />
       </div>
       <div className="sm:col-span-2">
         <ShowField
@@ -101,19 +107,43 @@ export function MonitorForm({ devices }: { devices: MonitorDeviceOption[] }) {
       </div>
       <div>
         <label className={labelCls}>轮询间隔（秒，5-3600）</label>
-        <input
+        <Input
           type="number"
           {...form.register("intervalSeconds", { valueAsNumber: true })}
-          className={`mt-1 ${inputCls}`}
+          className="mt-1"
         />
       </div>
       <div>
         <label className={labelCls}>开始时间（留空 = 立即采样）</label>
-        <input type="datetime-local" {...form.register("startAt")} className={`mt-1 ${inputCls}`} />
+        <Controller
+          control={form.control}
+          name="startAt"
+          render={({ field }) => (
+            <DateTimeField
+              value={field.value}
+              onChange={field.onChange}
+              format="datetime-local"
+              placeholder="留空则立即采样"
+              className="mt-1"
+            />
+          )}
+        />
       </div>
       <div>
         <label className={labelCls}>截止时间（留空 = 不设截止）</label>
-        <input type="datetime-local" {...form.register("endAt")} className={`mt-1 ${inputCls}`} />
+        <Controller
+          control={form.control}
+          name="endAt"
+          render={({ field }) => (
+            <DateTimeField
+              value={field.value}
+              onChange={field.onChange}
+              format="datetime-local"
+              placeholder="留空则不设截止"
+              className="mt-1"
+            />
+          )}
+        />
       </div>
       <div className="flex items-end">
         <label className="flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
@@ -131,13 +161,13 @@ export function MonitorForm({ devices }: { devices: MonitorDeviceOption[] }) {
       ) : null}
 
       <div className="sm:col-span-2">
-        <button
+        <Button
           type="submit"
           disabled={form.formState.isSubmitting}
-          className="btn btn-primary w-full px-4 py-2.5"
+          className="w-full"
         >
           {form.formState.isSubmitting ? "启动中…" : "启动监控任务"}
-        </button>
+        </Button>
         <p className="mt-2 text-xs text-zinc-400">
           只读轮询详情页（uiautomator dump），判定有票即停止并给出外链；绝不点击购买，最多 720 次采样后自动收尾。
         </p>

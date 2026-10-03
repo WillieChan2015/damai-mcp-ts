@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Glyph } from "@/components/ui";
+
+import { Button } from "@/components/ui/button";
+import { Glyph } from "@/components/console";
 
 const STAGES = [
   { id: "waiting", label: "NTP 候场" },
@@ -173,14 +175,16 @@ export function ProgressViewer({ taskId }: { taskId: string | null }) {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
+          <Button
             type="button"
+            variant="outline"
+            size="xs"
             onClick={copyLogs}
             disabled={lines.length === 0}
-            className="rounded border border-line bg-surface px-2 py-1 font-mono text-[11px] text-muted hover:text-ink disabled:opacity-40"
+            className="font-mono"
           >
             {copied ? "已复制日志" : "复制日志"}
-          </button>
+          </Button>
         </div>
       </div>
 

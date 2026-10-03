@@ -1,8 +1,9 @@
+import { Card } from "@/components/ui/card";
 import Link from "next/link";
 import { DeviceManager } from "@core/device/manager";
 
 import { deviceModelLabel } from "@/lib/deviceLabel";
-import { Glyph, PageHeader } from "@/components/ui";
+import { Glyph, PageHeader } from "@/components/console";
 
 import { ConnectForm } from "./ConnectForm";
 import { DisconnectButton } from "./DisconnectButton";
@@ -52,9 +53,9 @@ export default async function DevicesPage() {
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {devices.map((d) => (
-              <div
+              <Card
                 key={d.deviceId}
-                className="panel flex flex-col justify-between p-4 transition-all hover:border-line-strong"
+                className="flex flex-col justify-between p-4 transition-all hover:border-line-strong"
               >
                 <div>
                   <div className="flex items-start justify-between gap-2">
@@ -102,7 +103,7 @@ export default async function DevicesPage() {
                   </div>
                   <DisconnectButton deviceId={d.deviceId} />
                 </div>
-              </div>
+              </Card>
             ))}
           </div>
         )}
