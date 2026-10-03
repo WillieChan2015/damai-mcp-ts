@@ -6,6 +6,7 @@ import { useForm } from "react-hook-form";
 
 import { grabTaskInputSchema } from "@core/schemas/grab";
 
+import { ShowField } from "@/components/ShowField";
 import { startGrabTask } from "./actions";
 
 export interface TaskFormDevice {
@@ -79,7 +80,7 @@ export function TaskForm({
   return (
     <form onSubmit={onSubmit} className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2">
-        <div>
+        <div className="sm:col-span-2">
           <label className={labelCls}>目标设备</label>
           {devices.length > 0 ? (
             <select
@@ -101,12 +102,12 @@ export function TaskForm({
           )}
         </div>
 
-        <div>
-          <label className={labelCls}>大麦 Item ID</label>
-          <input
-            {...form.register("itemId")}
-            placeholder="例如 1063631004645"
-            className="field mt-1 font-mono text-xs"
+        <div className="sm:col-span-2">
+          <ShowField
+            deviceId={form.watch("deviceId")}
+            itemId={form.watch("itemId")}
+            onItemIdChange={(itemId) => form.setValue("itemId", itemId, { shouldValidate: true })}
+            itemError={form.formState.errors.itemId?.message}
           />
         </div>
 
@@ -177,13 +178,9 @@ export function TaskForm({
         </div>
       </div>
 
-      {(form.formState.errors.deviceId ||
-        form.formState.errors.itemId ||
-        form.formState.errors.openTime) && (
+      {(form.formState.errors.deviceId || form.formState.errors.openTime) && (
         <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
-          {form.formState.errors.deviceId?.message ??
-            form.formState.errors.itemId?.message ??
-            form.formState.errors.openTime?.message}
+          {form.formState.errors.deviceId?.message ?? form.formState.errors.openTime?.message}
         </div>
       )}
 

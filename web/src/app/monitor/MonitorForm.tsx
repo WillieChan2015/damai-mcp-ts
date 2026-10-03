@@ -5,6 +5,7 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 
+import { ShowField } from "@/components/ShowField";
 import { startMonitorTask } from "./actions";
 
 /** 表单下拉项（page.tsx 由 DeviceManager.listDevices 映射而来）。 */
@@ -20,7 +21,7 @@ export interface MonitorDeviceOption {
  */
 const monitorFormSchema = z.object({
   deviceId: z.string().min(1, "请选择设备"),
-  itemId: z.string().min(1, "请填写场次 item id"),
+  itemId: z.string().min(1, "请先读取手机上的演出，或粘贴分享内容"),
   intervalSeconds: z
     .number({ invalid_type_error: "请填写轮询间隔秒数" })
     .int("须为整数秒")
@@ -74,13 +75,11 @@ export function MonitorForm({ devices }: { devices: MonitorDeviceOption[] }) {
     "field";
   const labelCls = "block text-xs font-medium text-zinc-600 dark:text-zinc-400";
   const formError =
-    form.formState.errors.deviceId?.message ??
-    form.formState.errors.itemId?.message ??
-    form.formState.errors.intervalSeconds?.message;
+    form.formState.errors.deviceId?.message ?? form.formState.errors.intervalSeconds?.message;
 
   return (
     <form onSubmit={onSubmit} className="grid gap-3 sm:grid-cols-2">
-      <div>
+      <div className="sm:col-span-2">
         <label className={labelCls}>设备（只读采样，不干扰人工操作）</label>
         <select {...form.register("deviceId")} className={`mt-1 ${inputCls}`}>
           <option value="">请选择设备</option>
@@ -91,9 +90,13 @@ export function MonitorForm({ devices }: { devices: MonitorDeviceOption[] }) {
           ))}
         </select>
       </div>
-      <div>
-        <label className={labelCls}>场次 item id</label>
-        <input {...form.register("itemId")} placeholder="1063631004645" className={`mt-1 ${inputCls}`} />
+      <div className="sm:col-span-2">
+        <ShowField
+          deviceId={form.watch("deviceId")}
+          itemId={form.watch("itemId")}
+          onItemIdChange={(itemId) => form.setValue("itemId", itemId, { shouldValidate: true })}
+          itemError={form.formState.errors.itemId?.message}
+        />
       </div>
       <div>
         <label className={labelCls}>轮询间隔（秒，5-3600）</label>

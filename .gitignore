@@ -5,6 +5,7 @@ node_modules/
 # 构建产物（当前 tsconfig 为 noEmit，保留以防后续加构建）
 dist/
 *.tsbuildinfo
+.next/
 
 # 测试与覆盖率（vitest）
 coverage/

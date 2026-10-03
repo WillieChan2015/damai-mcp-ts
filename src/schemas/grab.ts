@@ -29,8 +29,8 @@ export type DeviceDisconnectInput = z.infer<typeof deviceDisconnectSchema>;
 export const grabTaskInputSchema = z.object({
   /** 目标设备序列号。 */
   deviceId: z.string().min(1).max(128),
-  /** 大麦 item id。 */
-  itemId: z.string().min(1).max(64),
+  /** 大麦 item id。网页端可由当前页或分享内容填入。 */
+  itemId: z.string().min(1, "请先读取手机上的演出，或粘贴分享内容").max(64),
   /** 票档序号（1-based）。 */
   priceIndex: z.number().int().min(1).max(50).default(1),
   /** 观演人姓名列表（大麦实名制）；null = 不选择（App 自动带入）。 */
