@@ -7,10 +7,13 @@ import { dirname } from "node:path";
 
 import { DOMParser, XMLSerializer, onErrorStopParsing } from "@xmldom/xmldom";
 
-import { adb, persistentShellEnabledFor, runShellCommand, shell } from "../device/adb";
+import { adb, persistentShellEnabledFor, runShellCommand } from "../device/adb";
 import { ADBError } from "../utils/errors";
 import { logger } from "../utils/logging";
 import { UIElement, parseBounds } from "./models";
+import { clearNoIdleDumpCache, tryNoIdleDump } from "./noIdleDump";
+
+export { clearNoIdleDumpCache };
 
 /**
  * dump XML 读取路径的进程内 memo：记住首次命中的候选路径，后续 dump 优先
@@ -23,6 +26,80 @@ let dumpReadPathMemo: string | null = null;
 /** 清空 dump XML 读取路径的 memo，迫使下一次 dump 重新按候选顺序探测。 */
 export function clearDumpReadPathMemo(): void {
   dumpReadPathMemo = null;
+}
+
+interface DumpCommandOutput {
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * 先尝试不等 idle 的 dump。系统命令把 `could not get idle state` 打在 stderr，
+ * 这条路径若已经打出同样的错误，就不再跑原生命令（它会再空等 10 秒）。
+ */
+async function captureUiDump(
+  deviceId: string,
+  compressed: boolean,
+  stockFallback: boolean,
+): Promise<DumpCommandOutput> {
+  const dumpCmd = compressed ? "uiautomator dump --compressed" : "uiautomator dump";
+  const quick = await tryNoIdleDump(deviceId, compressed);
+  if (quick && (quick.stdout.includes("dumped") || quick.stderr.includes("dumped"))) {
+    return quick;
+  }
+  if (quick && /could not get idle state/.test(`${quick.stdout}\n${quick.stderr}`)) {
+    return quick;
+  }
+  if (quick && /null root node/.test(quick.stderr)) {
+    // connect() 刚完成时根节点偶尔还没到，再试一次；仍没有再回落系统命令。
+    const again = await tryNoIdleDump(deviceId, compressed);
+    if (again && (again.stdout.includes("dumped") || again.stderr.includes("dumped"))) {
+      return again;
+    }
+    if (again && /could not get idle state/.test(`${again.stdout}\n${again.stderr}`)) {
+      return again;
+    }
+  }
+  if (!stockFallback) {
+    return (
+      quick ?? {
+        stdout: "",
+        stderr: "不等 idle 的 uiautomator 不可用",
+      }
+    );
+  }
+
+  if (persistentShellEnabledFor(deviceId)) {
+    try {
+      // uiautomator dump 在真机/模拟器上可能远超普通 input 命令的耗时。
+      // 回执里没有 dumped 就到此为止：持久 shell 不保留 stderr，再 spawn 一次
+      // 只会把 10 秒 idle 等待再付一遍。
+      const stdout = await runShellCommand(dumpCmd, { deviceId, receiptTimeoutMs: 15000 });
+      if (stdout.includes("dumped")) {
+        return { stdout, stderr: "" };
+      }
+      return {
+        stdout,
+        stderr: "uiautomator dump 没有写出 XML（界面持续刷新时系统命令会报 could not get idle state）",
+      };
+    } catch {
+      // 持久通道失败（回执超时 / 会话关闭 / 远端报错）→ 回落一次性 spawn
+    }
+  }
+  const result = await adb("shell", dumpCmd, { deviceId, timeout: 15, check: false });
+  return {
+    stdout: result.stdout.replace(/[\r\n]+$/, ""),
+    stderr: result.stderr.replace(/[\r\n]+$/, ""),
+  };
+}
+
+/** 失败信息优先带上 stderr。两边都空时保留原来的 JSON 空串形态。 */
+export function formatUiautomatorDumpFailure(stdout: string, stderr: string): string {
+  const detail = [stderr.trim(), stdout.trim()].filter((part) => part !== "").join(" ");
+  if (!detail) {
+    return `uiautomator dump 失败: ${JSON.stringify(stdout)}`;
+  }
+  return `uiautomator dump 失败: ${detail.replace(/\s+/g, " ").slice(0, 300)}`;
 }
 
 /** 在 UIElement 上提升为一等字段的原生 XML 属性（对应 Python `_NODE_FIELDS`）。 */
@@ -88,39 +165,31 @@ function parseXml(xmlText: string) {
  * （为简单起见未暴露）。
  *
  * 实现步骤：
- *   1. `adb shell uiautomator dump /sdcard/window_dump.xml`
+ *   1. 优先跑 NOP 掉 `waitForIdle` 的 uiautomator（界面持续刷新时系统命令会
+ *      空等 10 秒后失败）。不可用时回落 `adb shell uiautomator dump`。
  *   2. `adb exec-out cat /sdcard/window_dump.xml` 读取 XML
  *   3. XML 解析 → 遍历所有节点
  *
  * @remarks
- * 步骤 1 的写命令段在 per-device 持久 shell 启用时走常驻会话
- * （{@link persistentShellEnabledFor}），任一通道失败回落一次性 spawn 重试
- * 一次；未启用时与旧行为逐字一致。步骤 2 的 XML 读取恒走 `adb exec-out cat`
- * 一次性进程（原始字节策略：交互式 shell 流无法承载二进制），但会经
- * {@link dumpReadPathMemo} 记住首次命中的候选路径优先直读。
+ * 步骤 1 的系统命令回落：per-device 持久 shell 启用且回执里已有 `dumped` 时
+ * 直接采用（{@link persistentShellEnabledFor}）；否则走一次性 `adb shell`，
+ * 这样失败时能看到 stderr（`could not get idle state` 写在 stderr，stdout 为空）。
+ * 步骤 2 的 XML 读取恒走 `adb exec-out cat` 一次性进程（原始字节策略：交互式
+ * shell 流无法承载二进制），但会经 {@link dumpReadPathMemo} 记住首次命中的
+ * 候选路径优先直读。
  */
 export async function dumpUi(
   deviceId: string,
-  { compressed = true }: { compressed?: boolean } = {},
+  {
+    compressed = true,
+    stockFallback = true,
+  }: { compressed?: boolean; stockFallback?: boolean } = {},
 ): Promise<UIElement[]> {
-  // 1. 让 uiautomator 执行 dump
-  const dumpCmd = compressed ? "uiautomator dump --compressed" : "uiautomator dump";
-  let dumpOut: string;
-  if (persistentShellEnabledFor(deviceId)) {
-    try {
-      // uiautomator dump 在真机/模拟器上可能远超普通 input 命令的耗时
-      dumpOut = await runShellCommand(dumpCmd, { deviceId, receiptTimeoutMs: 15000 });
-    } catch {
-      // 持久通道失败（回执超时 / 会话关闭 / 远端报错）→ 回落一次性 spawn 重试一次
-      dumpOut = await shell(dumpCmd, { deviceId, timeout: 15, check: false });
-    }
-  } else {
-    dumpOut = await shell(dumpCmd, { deviceId, timeout: 15, check: false });
-  }
-  // uiautomator dump 会在 stdout 打印 "UI hierchary dumped to: /sdcard/...xml"
+  // 1. 让 uiautomator 执行 dump。成功时 stdout 含 "UI hierchary dumped to: ..."
   // （持久 shell 的命令回显只含 "dump"，不含 "dumped"，无误命中）
-  if (!dumpOut || !dumpOut.includes("dumped")) {
-    throw new ADBError(`uiautomator dump 失败: ${JSON.stringify(dumpOut)}`);
+  const captured = await captureUiDump(deviceId, compressed, stockFallback);
+  if (!captured.stdout.includes("dumped") && !captured.stderr.includes("dumped")) {
+    throw new ADBError(formatUiautomatorDumpFailure(captured.stdout, captured.stderr));
   }
 
   // 2. 读取 XML —— 依次尝试若干已知路径

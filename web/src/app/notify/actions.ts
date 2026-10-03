@@ -18,10 +18,11 @@ const SEND_TIMEOUT_MS = 10_000;
  * 发送失败不抛错——sendText 返回 SendOutcome（wechat.ts:203-215）原样回传并附
  * describeSendOutcome 的中文释义；origin 非法等由 constructor 抛中文错走 serverError。
  *
- * 安全：服务端不回传完整 token；不调用 saveNotifyCredentials（web 不写凭证文件）；
- * 本模块不打任何日志。
+ * 安全：服务端不回传完整 token；不调用 saveNotifyCredentials（web 不写凭证文件）。
+ * 操作日志只记类型「测试通知」和耗时，不记 origin / token。
  */
 export const sendTestNotification = actionClient
+  .metadata({ operation: "测试通知" })
   .schema(sendTestSchema)
   .action(async ({ parsedInput }) => {
     const { credentials, missingLines } = await resolveNotifyCredentials({

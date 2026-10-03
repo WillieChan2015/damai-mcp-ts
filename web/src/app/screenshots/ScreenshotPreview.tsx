@@ -3,11 +3,13 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { deviceChoiceLabel, type DeviceIdentity } from "@/lib/deviceLabel";
+
 /** 轮询间隔（ms）：与 no-store + 时间戳查询参数配合防缓存。 */
 const POLL_MS = 2000;
 
 /** 页面传递给预览组件的最小设备信息（可序列化）。 */
-export interface PreviewDevice {
+export interface PreviewDevice extends DeviceIdentity {
   deviceId: string;
   model?: string;
 }
@@ -62,8 +64,7 @@ export function ScreenshotPreview({ devices }: { devices: PreviewDevice[] }) {
                   : "border-line bg-surface text-muted hover:border-line-strong hover:text-ink"
               }`}
             >
-              {d.deviceId}
-              {d.model ? ` · ${d.model}` : ""}
+              {deviceChoiceLabel(d)}
             </button>
           ))}
         </div>

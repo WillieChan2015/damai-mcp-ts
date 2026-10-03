@@ -12,6 +12,7 @@ import {
 
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 
+import { logPageOperation } from "@/lib/actionLog";
 import { loadAiSettings } from "@/lib/aiConfig";
 import { buildReadOnlyAiTools } from "@/lib/aiTools";
 
@@ -150,18 +151,29 @@ export async function buildAiChatResponse(opts: {
  * 请求体 `{ messages: UIMessage[] }`；缺 messages / 非数组 → 400 中文。
  */
 export async function POST(req: Request): Promise<Response> {
+  const startedAt = performance.now();
   let body: unknown;
   try {
     body = await req.json();
   } catch {
+    logPageOperation("AI 对话", startedAt, "invalid");
     return Response.json({ error: "请求体不是合法 JSON" }, { status: 400 });
   }
   const messages = (body as { messages?: unknown } | null)?.messages;
   if (!Array.isArray(messages)) {
+    logPageOperation("AI 对话", startedAt, "invalid");
     return Response.json({ error: "请求体缺少 messages 数组" }, { status: 400 });
   }
-  return buildAiChatResponse({
-    messages: messages as UIMessage[],
-    abortSignal: req.signal,
-  });
+  try {
+    const response = await buildAiChatResponse({
+      messages: messages as UIMessage[],
+      abortSignal: req.signal,
+    });
+    // 流在响应返回后才继续生成，这里只记受理耗时。
+    logPageOperation("AI 对话", startedAt, response.ok ? "accepted" : "failed");
+    return response;
+  } catch (exc) {
+    logPageOperation("AI 对话", startedAt, "failed");
+    throw exc;
+  }
 }

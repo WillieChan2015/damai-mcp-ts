@@ -2,11 +2,13 @@
 
 import { useState } from "react";
 
+import { deviceChoiceLabel, type DeviceIdentity } from "@/lib/deviceLabel";
+
 import { FindTextForm } from "./FindTextForm";
 import { UiTreePanel } from "./UiTreePanel";
 
 /** 设备下拉的最小字段（page.tsx 从 DeviceInfo 映射，避免整包序列化）。 */
-export interface ProbeDeviceOption {
+export interface ProbeDeviceOption extends DeviceIdentity {
   deviceId: string;
   model: string;
 }
@@ -42,11 +44,11 @@ export function ProbeWorkspace({ devices }: { devices: ProbeDeviceOption[] }) {
         <select
           value={deviceId}
           onChange={(e) => setDeviceId(e.target.value)}
-          className="field max-w-xs text-xs font-mono"
+          className="field max-w-md text-xs"
         >
           {devices.map((d) => (
             <option key={d.deviceId} value={d.deviceId}>
-              {d.deviceId} {d.model ? `(${d.model})` : ""}
+              {deviceChoiceLabel(d)}
             </option>
           ))}
         </select>

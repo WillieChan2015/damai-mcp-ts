@@ -13,7 +13,12 @@ export default async function ProbePage() {
   let devices: ProbeDeviceOption[] = [];
   try {
     const infos = await DeviceManager.shared().listDevices(true);
-    devices = infos.map((d) => ({ deviceId: d.deviceId, model: d.model }));
+    devices = infos.map((d) => ({
+      deviceId: d.deviceId,
+      model: d.model,
+      marketName: d.marketName,
+      deviceName: d.deviceName,
+    }));
   } catch {
     devices = [];
   }

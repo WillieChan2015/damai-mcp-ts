@@ -8,9 +8,11 @@ import { dumpUiSchema, findTextSchema } from "./schemas";
 // 只 mock probe 页的两个 core 入口（dumpUi / findByText），不触 adb
 const dumpUiMock = vi.hoisted(() => vi.fn<() => Promise<UIElement[]>>());
 const findByTextMock = vi.hoisted(() => vi.fn<() => Promise<UIElement>>());
+const debugMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@core/inspector/dump", () => ({ dumpUi: dumpUiMock }));
 vi.mock("@core/inspector/find", () => ({ findByText: findByTextMock }));
+vi.mock("@core/utils/logging", () => ({ logger: { debug: debugMock } }));
 
 /** 构造命中元素（buy 按钮语义）。 */
 function makeBuyElement(attrs?: Record<string, string>): UIElement {
@@ -129,6 +131,7 @@ describe("dumpDeviceUi", () => {
     expect(result.data?.elements[0]?.index).toBe(0);
     expect(result.data?.elements[2999]?.index).toBe(2999);
     expect(result.data?.meta.dumpedBy).toBe("src/inspector/dump.ts:102 dumpUi");
+    expect(debugMock).toHaveBeenCalledWith(expect.stringMatching(/^页面操作 导出界面 完成，耗时 \d+ms$/));
   });
 
   it("少量元素：truncated=false，attrs 非 null 时附带", async () => {
@@ -149,5 +152,8 @@ describe("dumpDeviceUi", () => {
     const result = await dumpDeviceUi({ deviceId: "emu-x" });
     expect(result.data).toBeUndefined();
     expect(result.serverError).toContain("uiautomator dump 失败");
+    expect(debugMock).toHaveBeenCalledWith(
+      expect.stringMatching(/^页面操作 导出界面 失败，耗时 \d+ms：uiautomator dump 失败: 未发现设备$/),
+    );
   });
 });

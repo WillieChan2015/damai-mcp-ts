@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import Link from "next/link";
 
 export type GlyphName =
   | "devices"
@@ -183,30 +184,43 @@ export function Badge({
   );
 }
 
-/** 战备状态指标卡。 */
+/** 战备状态指标卡。传入 href 时整张卡跳转到对应页面。 */
 export function MetricCard({
   title,
   value,
   subtext,
   glyph,
   active = false,
+  href,
 }: {
   title: string;
   value: ReactNode;
   subtext: string;
   glyph: GlyphName;
   active?: boolean;
+  href?: string;
 }) {
-  return (
-    <div className={`panel p-4 transition-colors ${active ? "border-ink/40 bg-surface" : "bg-surface"}`}>
+  const className = `panel block p-4 transition-colors ${
+    href ? "hover:border-ink/30 hover:bg-surface-raised" : ""
+  } ${active ? "border-ink/40 bg-surface" : "bg-surface"}`;
+  const content = (
+    <>
       <div className="flex items-center justify-between text-muted">
         <span className="text-xs font-medium">{title}</span>
         <Glyph name={glyph} className={`h-4 w-4 ${active ? "text-accent" : "text-muted"}`} />
       </div>
       <div className="mt-2 text-2xl font-semibold tracking-tight text-ink font-mono">{value}</div>
       <div className="mt-1 text-xs text-muted">{subtext}</div>
-    </div>
+    </>
   );
+  if (href) {
+    return (
+      <Link href={href} className={className}>
+        {content}
+      </Link>
+    );
+  }
+  return <div className={className}>{content}</div>;
 }
 
 /** 面板：线框、无阴影；带标题时标题与内容用细线分隔。 */

@@ -5,15 +5,21 @@ import { damaiUrl, extractDamaiItemId, resolveDamaiItemId } from "../src/damai/i
 import { interpretActivityTopDump, readCurrentDamaiItem } from "../src/damai/readItem";
 
 const shellMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<string>>());
+const dumpUiMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/device/adb", () => ({
   shell: shellMock,
+}));
+
+vi.mock("../src/inspector/dump", () => ({
+  dumpUi: dumpUiMock,
 }));
 
 const ITEM = "1063631004645";
 
 afterEach(() => {
   shellMock.mockReset();
+  dumpUiMock.mockReset();
 });
 
 describe("extractDamaiItemId", () => {
@@ -113,6 +119,31 @@ ACTIVITY MANAGER ACTIVITIES (dumpsys activity top)
     expect(interpretActivityTopDump(dump)).toEqual({ foreground: false, itemId: null });
   });
 
+  it("activity top 先打印后台微信时，认 mResumed 的大麦详情", () => {
+    const dump = `
+  ACTIVITY com.tencent.mm/.ui.LauncherUI 59505c0 pid=1
+      mResumed=false mStopped=true
+      Intent { dat=damai://item?id=599817890400 }
+  ACTIVITY cn.damai/.trade.newtradeorder.ui.projectdetail.ui.activity.ProjectDetailActivity 9b99dce pid=2
+      mResumed=true mStopped=false
+      Intent { dat=damai://item?id=${ITEM} cmp=cn.damai/.ProjectDetailActivity }
+  ACTIVITY com.miui.home/.launcher.Launcher 6c04f11 pid=3
+      mResumed=false
+`;
+    expect(interpretActivityTopDump(dump)).toEqual({ foreground: true, itemId: ITEM });
+  });
+
+  it("前台微信 resumed 时不采用后面停着的大麦编号", () => {
+    const dump = `
+  ACTIVITY com.tencent.mm/.ui.LauncherUI pid=1
+      mResumed=true mStopped=false
+  ACTIVITY cn.damai/.ProjectDetailActivity pid=2
+      mResumed=false mStopped=true
+      Intent { dat=damai://item?id=${ITEM} }
+`;
+    expect(interpretActivityTopDump(dump)).toEqual({ foreground: false, itemId: null });
+  });
+
   it("大麦在前台但当前页没有编号", () => {
     const dump = `
   * Hist #0: ActivityRecord{111 u0 cn.damai/.homepage.MainActivity t12}
@@ -127,18 +158,49 @@ ACTIVITY MANAGER ACTIVITIES (dumpsys activity top)
 });
 
 describe("readCurrentDamaiItem", () => {
-  it("top 没有 Activity 段时改读 activities", async () => {
+  it("activities 没有 Activity 段时改读 activity top", async () => {
     shellMock
-      .mockResolvedValueOnce("")
+      .mockResolvedValueOnce("ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)\n")
       .mockResolvedValueOnce(
-        `* Hist #0: ActivityRecord{1 u0 cn.damai/.Detail t1}\nIntent { dat=damai://item?id=${ITEM} }`,
+        `ACTIVITY cn.damai/.Detail pid=1\n    mResumed=true\n    Intent { dat=damai://item?id=${ITEM} }`,
       );
     await expect(readCurrentDamaiItem("serial")).resolves.toEqual({
       foreground: true,
       itemId: ITEM,
     });
     expect(shellMock).toHaveBeenCalledTimes(2);
-    expect(shellMock.mock.calls[0]?.slice(0, 3)).toEqual(["dumpsys", "activity", "top"]);
-    expect(shellMock.mock.calls[1]?.slice(0, 3)).toEqual(["dumpsys", "activity", "activities"]);
+    expect(shellMock.mock.calls[0]?.slice(0, 3)).toEqual(["dumpsys", "activity", "activities"]);
+    expect(shellMock.mock.calls[1]?.slice(0, 3)).toEqual(["dumpsys", "activity", "top"]);
+    expect(dumpUiMock).not.toHaveBeenCalled();
+  });
+
+  it("详情 Intent 没有编号时从界面文案里抽", async () => {
+    shellMock.mockResolvedValue(
+      `ACTIVITY cn.damai/.ProjectDetailActivity pid=2\n    mResumed=true\n    Intent { dat=damai://projectdetail (has extras) }\n`,
+    );
+    dumpUiMock.mockResolvedValueOnce([
+      {
+        package: "cn.damai",
+        text: "周杰伦演唱会",
+        contentDesc: `https://m.damai.cn/shows/item.html?itemId=${ITEM}`,
+      },
+    ]);
+    await expect(readCurrentDamaiItem("serial")).resolves.toEqual({
+      foreground: true,
+      itemId: ITEM,
+    });
+    expect(dumpUiMock).toHaveBeenCalledWith("serial", { compressed: false, stockFallback: false });
+  });
+
+  it("界面 dump 里没有大麦节点时标记被盖住", async () => {
+    shellMock.mockResolvedValue(
+      `* Hist #0: ActivityRecord{1 u0 cn.damai/.ProjectDetailActivity t1}\nIntent { dat=damai://projectdetail }\n`,
+    );
+    dumpUiMock.mockResolvedValueOnce([{ package: "com.android.systemui", text: "", contentDesc: "" }]);
+    await expect(readCurrentDamaiItem("serial")).resolves.toEqual({
+      foreground: true,
+      itemId: null,
+      covered: true,
+    });
   });
 });

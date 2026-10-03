@@ -6,7 +6,7 @@ import { PageHeader } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
 
-export const metadata = { title: "抢票任务作战舱 · damai-mcp-ts" };
+export const metadata = { title: "抢票任务作战舱" };
 
 export default async function TasksPage() {
   const manager = getTaskManager();
@@ -14,7 +14,12 @@ export default async function TasksPage() {
   let devices: Array<{ deviceId: string; model?: string }> = [];
   try {
     const list = await DeviceManager.shared().listDevices(true);
-    devices = list.map((d) => ({ deviceId: d.deviceId, model: d.model }));
+    devices = list.map((d) => ({
+      deviceId: d.deviceId,
+      model: d.model,
+      marketName: d.marketName,
+      deviceName: d.deviceName,
+    }));
   } catch {
     devices = [];
   }

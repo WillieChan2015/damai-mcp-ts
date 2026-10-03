@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { logPageOperation } from "@/lib/actionLog";
 import { getAiSettingsStatus, saveAiSettings } from "@/lib/aiConfig";
 
 export const dynamic = "force-dynamic";
@@ -50,14 +51,17 @@ export async function GET(): Promise<Response> {
 }
 
 export async function POST(req: Request): Promise<Response> {
+  const startedAt = performance.now();
   let body: unknown;
   try {
     body = await req.json();
   } catch {
+    logPageOperation("保存 AI 设置", startedAt, "invalid");
     return Response.json({ error: "请求体不是合法 JSON" }, { status: 400 });
   }
   const parsed = aiSettingsSchema.safeParse(body);
   if (!parsed.success) {
+    logPageOperation("保存 AI 设置", startedAt, "invalid");
     return Response.json(
       { error: `AI 设置校验失败：${formatIssues(parsed.error)}` },
       { status: 400 },
@@ -67,7 +71,9 @@ export async function POST(req: Request): Promise<Response> {
     await saveAiSettings(parsed.data);
   } catch (exc) {
     const message = exc instanceof Error ? exc.message : String(exc);
+    logPageOperation("保存 AI 设置", startedAt, "failed", message);
     return Response.json({ error: message }, { status: 500 });
   }
+  logPageOperation("保存 AI 设置", startedAt, "ok");
   return statusResponse(200);
 }

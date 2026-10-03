@@ -33,7 +33,12 @@ export default async function MonitorPage() {
         <h2 className="text-base font-semibold text-ink">新建监控任务</h2>
         <div className="mt-4">
           <MonitorForm
-            devices={devices.map((d) => ({ deviceId: d.deviceId, model: d.model }))}
+            devices={devices.map((d) => ({
+              deviceId: d.deviceId,
+              model: d.model,
+              marketName: d.marketName,
+              deviceName: d.deviceName,
+            }))}
           />
         </div>
       </section>

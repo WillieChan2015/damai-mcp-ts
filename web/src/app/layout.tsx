@@ -26,7 +26,7 @@ const displaySerif = Noto_Serif_SC({
 });
 
 export const metadata: Metadata = {
-  title: "抢票指挥台 · damai-mcp-ts",
+  title: "抢票指挥台",
   description: "大麦抢票可视化指挥台：任务、监控、日志与调试",
 };
 
@@ -51,12 +51,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
               className="mx-auto flex w-full max-w-7xl items-center gap-4 sm:gap-6 px-4 py-2.5 sm:px-6"
               aria-label="品牌与导航"
             >
-              <Link href="/" className="flex items-baseline gap-2 whitespace-nowrap">
+              <Link href="/" className="whitespace-nowrap">
                 <span className="font-display text-lg font-black tracking-tight text-ink">
                   抢票指挥台
-                </span>
-                <span className="hidden font-mono text-[10px] text-muted sm:inline">
-                  damai-mcp-ts
                 </span>
               </Link>
               <NavLinks />

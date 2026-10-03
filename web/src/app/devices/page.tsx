@@ -1,9 +1,11 @@
 import Link from "next/link";
 import { DeviceManager } from "@core/device/manager";
 
+import { deviceModelLabel } from "@/lib/deviceLabel";
+import { Glyph, PageHeader } from "@/components/ui";
+
 import { ConnectForm } from "./ConnectForm";
 import { DisconnectButton } from "./DisconnectButton";
-import { Glyph, PageHeader } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
 
@@ -59,7 +61,7 @@ export default async function DevicesPage() {
                     <div className="flex items-center gap-2">
                       <span className="live-dot shrink-0" />
                       <span className="font-semibold text-sm text-ink truncate">
-                        {d.model || "Android 终端"}
+                        {deviceModelLabel(d) || "Android 终端"}
                       </span>
                     </div>
                     <span className="rounded border border-line bg-surface-raised px-1.5 py-0.5 font-mono text-[11px] text-muted shrink-0">

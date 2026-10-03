@@ -31,6 +31,13 @@ describe("readCurrentShow", () => {
     });
   });
 
+  it("锁屏盖住详情时提示先解锁", async () => {
+    readMock.mockResolvedValueOnce({ foreground: true, itemId: null, covered: true });
+    const result = await readCurrentShow({ deviceId: "phone" });
+    expect(result.data?.itemId).toBeNull();
+    expect(result.data?.message).toContain("解锁");
+  });
+
   it("大麦不在前台时说明先打开详情", async () => {
     readMock.mockResolvedValueOnce({ foreground: false, itemId: null });
     const result = await readCurrentShow({ deviceId: "phone" });

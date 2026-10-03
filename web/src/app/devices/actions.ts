@@ -12,6 +12,7 @@ import { actionClient } from "@/lib/safe-action";
 
 /** 连接设备（adb connect host:port；序列号形式直接登记）。 */
 export const connectDevice = actionClient
+  .metadata({ operation: "连接设备" })
   .schema(deviceConnectSchema)
   .action(async ({ parsedInput }) => {
     const info = await DeviceManager.shared().connect(parsedInput.hostPort);
@@ -21,6 +22,7 @@ export const connectDevice = actionClient
 
 /** 断开设备。 */
 export const disconnectDevice = actionClient
+  .metadata({ operation: "断开设备" })
   .schema(deviceDisconnectSchema)
   .action(async ({ parsedInput }) => {
     await DeviceManager.shared().disconnect(parsedInput.deviceId);

@@ -20,8 +20,12 @@ export interface DeviceInfoInit {
   deviceId: string;
   /** 设备状态："device" | "offline" | "unauthorized"。 */
   state: string;
-  /** 型号（ro.product.model）。 */
+  /** 型号代码（ro.product.model），如 `24129PN74C`。 */
   model?: string;
+  /** 市场名（ro.product.marketname），如 `Xiaomi 15`。没有则为空。 */
+  marketName?: string;
+  /** 系统设置里的设备名（persist.sys.device_name），用户自己起的名字。 */
+  deviceName?: string;
   /** Android 版本（ro.build.version.release）。 */
   androidVersion?: string;
   /** SDK 版本（ro.build.version.sdk）。 */
@@ -44,8 +48,12 @@ export class DeviceInfo {
   readonly deviceId: string;
   /** 设备状态："device" | "offline" | "unauthorized"。 */
   readonly state: string;
-  /** 型号（ro.product.model）。 */
+  /** 型号代码（ro.product.model）。 */
   readonly model: string;
+  /** 市场名。没有可读机型名时为空串。 */
+  readonly marketName: string;
+  /** 用户在系统设置里起的设备名。没有时为空串。 */
+  readonly deviceName: string;
   /** Android 版本。 */
   readonly androidVersion: string;
   /** SDK 版本。 */
@@ -65,6 +73,8 @@ export class DeviceInfo {
     this.deviceId = init.deviceId;
     this.state = init.state;
     this.model = init.model ?? "";
+    this.marketName = init.marketName ?? "";
+    this.deviceName = init.deviceName ?? "";
     this.androidVersion = init.androidVersion ?? "";
     this.sdk = init.sdk ?? "";
     this.abi = init.abi ?? "";
@@ -105,6 +115,17 @@ export class DeviceInfo {
       last_seen: this.lastSeen,
     };
   }
+}
+
+/** 按顺序取第一个非空字符串。 */
+function firstFilled(...values: readonly string[]): string {
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (trimmed !== "") {
+      return trimmed;
+    }
+  }
+  return "";
 }
 
 /** 准单例管理器；经由 {@link DeviceManager.shared} 访问。 */
@@ -191,6 +212,12 @@ export class DeviceManager {
     };
 
     const model = await safeGet("getprop", "ro.product.model");
+    const marketName = firstFilled(
+      await safeGet("getprop", "ro.product.marketname"),
+      await safeGet("getprop", "ro.product.odm.marketname"),
+      await safeGet("getprop", "ro.product.bootimage.marketname"),
+    );
+    const deviceName = await safeGet("getprop", "persist.sys.device_name");
     const androidVersion = await safeGet("getprop", "ro.build.version.release");
     const sdk = await safeGet("getprop", "ro.build.version.sdk");
     const abi = await safeGet("getprop", "ro.product.cpu.abi");
@@ -214,6 +241,8 @@ export class DeviceManager {
       deviceId,
       state,
       model,
+      marketName,
+      deviceName,
       androidVersion,
       sdk,
       abi,

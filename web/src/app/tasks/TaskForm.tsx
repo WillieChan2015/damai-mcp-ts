@@ -7,9 +7,10 @@ import { useForm } from "react-hook-form";
 import { grabTaskInputSchema } from "@core/schemas/grab";
 
 import { ShowField } from "@/components/ShowField";
+import { deviceChoiceLabel, type DeviceIdentity } from "@/lib/deviceLabel";
 import { startGrabTask } from "./actions";
 
-export interface TaskFormDevice {
+export interface TaskFormDevice extends DeviceIdentity {
   deviceId: string;
   model?: string;
 }
@@ -89,7 +90,7 @@ export function TaskForm({
             >
               {devices.map((d) => (
                 <option key={d.deviceId} value={d.deviceId}>
-                  {d.deviceId} {d.model ? `(${d.model})` : ""}
+                  {deviceChoiceLabel(d)}
                 </option>
               ))}
             </select>

@@ -33,6 +33,7 @@ function toProbeElement(el: UIElement, index: number | null): ProbeElement {
  * 树结构由客户端按 bounds 重建（`./tree.ts` buildUiTree）。
  */
 export const dumpDeviceUi = actionClient
+  .metadata({ operation: "导出界面" })
   .schema(dumpUiSchema)
   .action(async ({ parsedInput }): Promise<ProbeDumpResult> => {
     const elements = await dumpUi(parsedInput.deviceId, {
@@ -51,6 +52,7 @@ export const dumpDeviceUi = actionClient
  * 其他异常（设备离线等）仍走 serverError 通道。
  */
 export const findTextProbe = actionClient
+  .metadata({ operation: "文本定位" })
   .schema(findTextSchema)
   .action(async ({ parsedInput }): Promise<ProbeFindResult> => {
     try {

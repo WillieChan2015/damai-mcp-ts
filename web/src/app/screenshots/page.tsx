@@ -40,6 +40,8 @@ export default async function ScreenshotsPage() {
     devices = (await DeviceManager.shared().listDevices(true)).map((d) => ({
       deviceId: d.deviceId,
       model: d.model,
+      marketName: d.marketName,
+      deviceName: d.deviceName,
     }));
   } catch {
     devices = [];

@@ -15,6 +15,7 @@ import { datetimeLocalToUnixMs, monitorTaskInputSchema } from "./schema";
  * 免费获得；取消不在此重复实现——前端直接复用 @/app/tasks/actions 的 cancelTask。
  */
 export const startMonitorTask = actionClient
+  .metadata({ operation: "启动监控" })
   .schema(monitorTaskInputSchema)
   .action(async ({ parsedInput }) => {
     const snapshot = getTaskManager().start({

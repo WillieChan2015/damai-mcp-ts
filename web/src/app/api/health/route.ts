@@ -4,7 +4,12 @@ import { getTaskManager, type TaskKind, type TaskStatus } from "@/task/manager";
 
 export const dynamic = "force-dynamic";
 
-/** 健康检查 + TaskManager 快照（Phase 0 冒烟验收点）。 */
+/**
+ * 健康检查 + TaskManager 快照（Phase 0 冒烟验收点）。
+ *
+ * 导航栏每 3 秒拉取。本处理函数不写日志；开发态访问日志由
+ * `logging.incomingRequests.ignore` 丢掉 `/api/health`。
+ */
 export function GET() {
   const manager = getTaskManager();
   const tasks = manager.list();

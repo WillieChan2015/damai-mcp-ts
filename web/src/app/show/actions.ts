@@ -17,6 +17,7 @@ export interface ShowResolveResult {
 const DEVICE_OFFLINE = "读不到手机。请确认数据线还连着，并且已允许 USB 调试。";
 
 export const readCurrentShow = actionClient
+  .metadata({ operation: "读取当前演出" })
   .schema(z.object({ deviceId: z.string().min(1).max(128) }))
   .action(async ({ parsedInput }): Promise<ShowResolveResult> => {
     let current;
@@ -34,16 +35,23 @@ export const readCurrentShow = actionClient
         message: "请先在手机上打开大麦，进入要抢的那场演出详情，再点读取。",
       };
     }
+    if (current.covered) {
+      return {
+        itemId: null,
+        message: "大麦的演出详情还在，但屏幕上盖着别的界面。请解锁并停在详情页，再点读取。",
+      };
+    }
     if (current.itemId === null) {
       return {
         itemId: null,
-        message: "大麦已在前台，这一页没有演出编号。请打开演出详情，或把分享内容粘贴到下面。",
+        message: "大麦已在前台，但没有读到演出编号。请确认打开的是演出详情；或在大麦里点分享，把文字粘贴到下面。",
       };
     }
     return { itemId: current.itemId, message: "已从手机当前页面识别演出。" };
   });
 
 export const resolveShareShow = actionClient
+  .metadata({ operation: "解析分享" })
   .schema(z.object({ text: z.string().trim().min(1).max(8000) }))
   .action(async ({ parsedInput }): Promise<ShowResolveResult> => {
     const itemId = await resolveDamaiItemId(parsedInput.text);

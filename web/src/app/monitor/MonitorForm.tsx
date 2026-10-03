@@ -6,10 +6,11 @@ import { useForm } from "react-hook-form";
 import { z } from "zod";
 
 import { ShowField } from "@/components/ShowField";
+import { deviceChoiceLabel, type DeviceIdentity } from "@/lib/deviceLabel";
 import { startMonitorTask } from "./actions";
 
 /** 表单下拉项（page.tsx 由 DeviceManager.listDevices 映射而来）。 */
-export interface MonitorDeviceOption {
+export interface MonitorDeviceOption extends DeviceIdentity {
   deviceId: string;
   model: string;
 }
@@ -85,7 +86,7 @@ export function MonitorForm({ devices }: { devices: MonitorDeviceOption[] }) {
           <option value="">请选择设备</option>
           {devices.map((d) => (
             <option key={d.deviceId} value={d.deviceId}>
-              {d.deviceId}（{d.model}）
+              {deviceChoiceLabel(d)}
             </option>
           ))}
         </select>

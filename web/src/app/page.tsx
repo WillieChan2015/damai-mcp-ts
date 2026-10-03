@@ -9,7 +9,7 @@ import { ClockHero } from "./ClockHero";
 
 export const dynamic = "force-dynamic";
 
-export const metadata = { title: "抢票指挥台 · damai-mcp-ts" };
+export const metadata = { title: "抢票指挥台" };
 
 interface StageEntry {
   href: string;
@@ -114,6 +114,7 @@ export default async function Home() {
           subtext={deviceCount > 0 ? "ADB 通路就绪" : "请先连接设备"}
           glyph="devices"
           active={deviceCount > 0}
+          href="/devices"
         />
         <MetricCard
           title="活动任务"
@@ -121,6 +122,7 @@ export default async function Home() {
           subtext={liveTasks.length > 0 ? "正在抢票/候场中" : "待命中"}
           glyph="tasks"
           active={liveTasks.length > 0}
+          href="/tasks"
         />
         <MetricCard
           title="余票监控"
@@ -128,6 +130,7 @@ export default async function Home() {
           subtext={monitorTasks.length > 0 ? "后台轮询中" : "暂无监控项"}
           glyph="monitor"
           active={monitorTasks.length > 0}
+          href="/monitor"
         />
         <MetricCard
           title="微信通知"
@@ -135,6 +138,7 @@ export default async function Home() {
           subtext={notifyReady ? "ClawBot 随时可推" : "需配置三要素"}
           glyph="notify"
           active={notifyReady}
+          href="/notify"
         />
       </section>
 

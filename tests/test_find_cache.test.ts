@@ -47,6 +47,28 @@ const DUMP_XML =
   `<?xml version="1.0" encoding="UTF-8"?>` +
   `<hierarchy><node text="立即购买" resource-id="" class="android.widget.Button" bounds="[0,0][100,50]"/></hierarchy>`;
 
+const DUMP_BANNER = "UI hierchary dumped to: /sdcard/window_dump.xml\n";
+
+/**
+ * 系统 jar 拉取失败，dump 命令走 adb shell 并返回成功横幅；cat 按路径给 XML。
+ * 不等 idle 的安装依赖真实 pull 写文件，桩不写文件，因此会回落这条路径。
+ */
+function mockAdbDump(xmlFor: (path: string) => Buffer | null): void {
+  vi.mocked(adb).mockImplementation(async (...args) => {
+    if (args[0] === "pull" || args[0] === "push") {
+      return fakeAdbResult({ returncode: 1 });
+    }
+    if (args[0] === "shell") {
+      return fakeAdbResult({ stdoutBytes: Buffer.from(DUMP_BANNER) });
+    }
+    if (args[0] === "exec-out" && args[1] === "cat") {
+      const xml = xmlFor(String(args[2]));
+      return xml ? fakeAdbResult({ stdoutBytes: xml }) : fakeAdbResult();
+    }
+    return fakeAdbResult();
+  });
+}
+
 /** adb mock 收到的全部 `exec-out cat <path>` 调用路径（按序）。 */
 function catPaths(): string[] {
   return vi
@@ -171,20 +193,16 @@ describe("dump 读取路径 memo（item-9）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     realDump.clearDumpReadPathMemo();
-    // uiautomator dump 写命令段：命中 "dumped" 判据
-    vi.mocked(shell).mockResolvedValue("UI hierchary dumped to: /sdcard/window_dump.xml");
+    realDump.clearNoIdleDumpCache();
   });
 
   afterEach(() => {
     realDump.clearDumpReadPathMemo();
+    realDump.clearNoIdleDumpCache();
   });
 
   it("首次按候选顺序探测命中候选 2 并写 memo；第二次只直读候选 2（1 次 cat）", async () => {
-    vi.mocked(adb).mockImplementation(async (...args) =>
-      args[2] === SECOND_CANDIDATE
-        ? fakeAdbResult({ stdoutBytes: Buffer.from(DUMP_XML) })
-        : fakeAdbResult(), // 其余候选返回空
-    );
+    mockAdbDump((path) => (path === SECOND_CANDIDATE ? Buffer.from(DUMP_XML) : null));
 
     await realDump.dumpUi(DEV);
     expect(catPaths()).toEqual([FIRST_CANDIDATE, SECOND_CANDIDATE]);
@@ -195,16 +213,12 @@ describe("dump 读取路径 memo（item-9）", () => {
   });
 
   it("memo 路径失效（返回空）→ 清 memo 回落候选顺序并重记 memo", async () => {
-    vi.mocked(adb).mockImplementation(async (...args) =>
-      args[2] === SECOND_CANDIDATE ? fakeAdbResult({ stdoutBytes: Buffer.from(DUMP_XML) }) : fakeAdbResult(),
-    );
+    mockAdbDump((path) => (path === SECOND_CANDIDATE ? Buffer.from(DUMP_XML) : null));
     await realDump.dumpUi(DEV); // memo = /sdcard/dump.xml
     vi.mocked(adb).mockClear();
 
     // memo 路径变空、候选 1 变有效
-    vi.mocked(adb).mockImplementation(async (...args) =>
-      args[2] === FIRST_CANDIDATE ? fakeAdbResult({ stdoutBytes: Buffer.from(DUMP_XML) }) : fakeAdbResult(),
-    );
+    mockAdbDump((path) => (path === FIRST_CANDIDATE ? Buffer.from(DUMP_XML) : null));
     await realDump.dumpUi(DEV);
     expect(catPaths()).toEqual([SECOND_CANDIDATE, FIRST_CANDIDATE]); // 先试 memo，失效后回落
 
@@ -214,9 +228,7 @@ describe("dump 读取路径 memo（item-9）", () => {
   });
 
   it("clearDumpReadPathMemo 后重新按候选顺序探测", async () => {
-    vi.mocked(adb).mockImplementation(async (...args) =>
-      args[2] === SECOND_CANDIDATE ? fakeAdbResult({ stdoutBytes: Buffer.from(DUMP_XML) }) : fakeAdbResult(),
-    );
+    mockAdbDump((path) => (path === SECOND_CANDIDATE ? Buffer.from(DUMP_XML) : null));
     await realDump.dumpUi(DEV);
     vi.mocked(adb).mockClear();
 
@@ -226,10 +238,25 @@ describe("dump 读取路径 memo（item-9）", () => {
   });
 
   it("memo 命中路径的读取结果仍过 <node 判据与解析（元素数一致）", async () => {
-    vi.mocked(adb).mockResolvedValue(fakeAdbResult({ stdoutBytes: Buffer.from(DUMP_XML) }));
+    mockAdbDump(() => Buffer.from(DUMP_XML));
     const first = await realDump.dumpUi(DEV);
     const second = await realDump.dumpUi(DEV);
     expect(second).toHaveLength(first.length);
     expect(second[0]?.text).toBe("立即购买");
+  });
+
+  it("stdout 为空时失败信息带上 stderr 的 idle 错误", async () => {
+    vi.mocked(adb).mockImplementation(async (...args) => {
+      if (args[0] === "pull" || args[0] === "push") {
+        return fakeAdbResult({ returncode: 1 });
+      }
+      if (args[0] === "shell") {
+        return fakeAdbResult({
+          stderrBytes: Buffer.from("ERROR: could not get idle state.\n"),
+        });
+      }
+      return fakeAdbResult();
+    });
+    await expect(realDump.dumpUi(DEV)).rejects.toThrow(/could not get idle state/);
   });
 });
