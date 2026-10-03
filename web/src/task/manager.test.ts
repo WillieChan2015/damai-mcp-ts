@@ -270,6 +270,74 @@ function seedSnapshot(overrides: Partial<TaskSnapshot>): TaskSnapshot {
   };
 }
 
+describe("延迟占锁与订单终态", () => {
+  it("候场抢票不占设备锁，到点取消同机监控后再占锁", async () => {
+    const mgr = new TaskManager();
+    let monitorSawStop = false;
+    const monitor = mgr.start({
+      kind: "monitor",
+      deviceId: "dev-yield",
+      runner: async ({ stopEvent }) => {
+        await stopEvent.wait();
+        monitorSawStop = true;
+      },
+    });
+    let grabStarted = false;
+    const grab = mgr.start({
+      kind: "grab",
+      deviceId: "dev-yield",
+      lockAtUnixMs: Date.now() + 30,
+      runner: async () => {
+        grabStarted = true;
+        return { status: "ready_for_human" };
+      },
+    });
+    expect(mgr.lockedDeviceIds()).toEqual(["dev-yield"]);
+    expect(mgr.get(grab.id)?.progress.some((line) => line.includes("设备未占用"))).toBe(true);
+    await mgr.whenSettled(monitor.id);
+    await mgr.whenSettled(grab.id);
+    expect(monitorSawStop).toBe(true);
+    expect(mgr.get(monitor.id)?.status).toBe("cancelled");
+    expect(grabStarted).toBe(true);
+    expect(mgr.get(grab.id)?.status).toBe("succeeded");
+    expect(mgr.lockedDeviceIds()).toEqual([]);
+  });
+
+  it("候场中取消不进入抢票", async () => {
+    const mgr = new TaskManager();
+    let ran = false;
+    const grab = mgr.start({
+      kind: "grab",
+      deviceId: "dev-wait-cancel",
+      lockAtUnixMs: Date.now() + 10_000,
+      runner: async () => {
+        ran = true;
+      },
+    });
+    mgr.cancel(grab.id);
+    await mgr.whenSettled(grab.id);
+    expect(ran).toBe(false);
+    expect(mgr.get(grab.id)?.status).toBe("cancelled");
+    expect(mgr.lockedDeviceIds()).toEqual([]);
+  });
+
+  it("结果已是 needs_action 时，stopEvent 不把任务改成 cancelled", async () => {
+    const mgr = new TaskManager();
+    const snap = mgr.start({
+      kind: "grab",
+      deviceId: "dev-order",
+      runner: async ({ stopEvent }) => {
+        stopEvent.set();
+        return { status: "needs_action", grab_result: { status: "needs_action" } };
+      },
+    });
+    await mgr.whenSettled(snap.id);
+    const done = mgr.get(snap.id);
+    expect(done?.status).toBe("succeeded");
+    expect(done?.progress.some((line) => line.includes("订单页"))).toBe(true);
+  });
+});
+
 describe("TaskManager 持久化与跨进程锁（Phase 2）", () => {
   it("注入 store：start/cancel/终态逐次落盘，终态后 loadAll 与内存快照一致（含 result 往返）", async () => {
     persistTmpDir = mkdtempSync(join(tmpdir(), "damai-web-mgr-"));

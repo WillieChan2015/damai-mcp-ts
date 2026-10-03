@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { DeviceLockfile, resolveLockfilePath } from "./lockfile";
 import { createSqliteTaskStore, resolveTaskDbPath, type TaskStore } from "./persistence";
 import { SimpleStopEvent } from "./stopEvent";
@@ -53,6 +55,11 @@ export interface TaskStartOptions {
   deviceId: string;
   runner: TaskRunner;
   label?: string;
+  /**
+   * 抢票到这个 Unix 毫秒才占设备锁。在此之前监控可以同机运行。
+   * 缺省或已到期则立即占锁。
+   */
+  lockAtUnixMs?: number;
 }
 
 /** 同设备已有运行中任务时抛出。 */
@@ -134,6 +141,8 @@ export class TaskManager {
   private readonly tasks = new Map<string, TaskEntry>();
   /** deviceId → 运行中/取消中的 taskId。任务终结时释放。 */
   private readonly deviceLocks = new Map<string, string>();
+  /** 尚未占锁的抢票（含候场）。挡住同设备第二场抢票，不挡住监控。 */
+  private readonly grabHolds = new Map<string, string>();
   /** 任务持久化存储（null = 不持久化）。 */
   private readonly store: TaskStore | null;
   /** 跨进程设备锁（null = 不做跨进程互斥）。 */
@@ -196,15 +205,32 @@ export class TaskManager {
 
   /** 登记并启动一个任务，立即返回快照（不等待任务完成）。 */
   start(opts: TaskStartOptions): TaskSnapshot {
+    const lockAt = opts.lockAtUnixMs;
+    const deferLock =
+      opts.kind === "grab" &&
+      typeof lockAt === "number" &&
+      Number.isFinite(lockAt) &&
+      lockAt > Date.now();
     const runningTaskId = this.deviceLocks.get(opts.deviceId);
     if (runningTaskId !== undefined) {
-      throw new TaskConflictError(opts.deviceId, runningTaskId);
+      const holder = this.tasks.get(runningTaskId);
+      const shareWithMonitor = deferLock && holder?.kind === "monitor";
+      if (!shareWithMonitor) {
+        throw new TaskConflictError(opts.deviceId, runningTaskId);
+      }
+    }
+    if (opts.kind === "grab") {
+      const heldGrabId = this.grabHolds.get(opts.deviceId);
+      if (heldGrabId !== undefined) {
+        throw new TaskConflictError(opts.deviceId, heldGrabId);
+      }
     }
 
     const id = generateTaskId();
-    // 跨进程互斥（D4）：先清理过期条目再占用；被其他存活 web 进程持有 →
-    // TaskConflictError(deviceId, 持有者 taskId)，与内存锁同一错误类型
-    this.lockfile?.acquire(opts.deviceId, id);
+    // 跨进程互斥（D4）：候场阶段不占锁。到预热点再占用。
+    if (!deferLock) {
+      this.lockfile?.acquire(opts.deviceId, id);
+    }
     const entry: TaskEntry = {
       id,
       kind: opts.kind,
@@ -224,10 +250,15 @@ export class TaskManager {
       settleWaiters: [],
     };
     this.tasks.set(id, entry);
-    this.deviceLocks.set(opts.deviceId, id);
+    if (opts.kind === "grab") {
+      this.grabHolds.set(opts.deviceId, id);
+    }
+    if (!deferLock) {
+      this.deviceLocks.set(opts.deviceId, id);
+    }
     // running 状态落盘（须先于 run：runner 若同步完成，终态 upsert 要覆盖在本条之后）
     this.persist(entry);
-    void this.run(entry, opts.runner);
+    void this.run(entry, opts.runner, deferLock ? lockAt : null);
     return this.snapshot(entry);
   }
 
@@ -311,8 +342,15 @@ export class TaskManager {
     };
   }
 
-  private async run(entry: TaskEntry, runner: TaskRunner): Promise<void> {
+  private async run(entry: TaskEntry, runner: TaskRunner, lockAtUnixMs: number | null): Promise<void> {
     try {
+      if (lockAtUnixMs !== null) {
+        const leftBeforeLock = await this.waitToLock(entry, lockAtUnixMs);
+        if (leftBeforeLock) {
+          entry.status = "cancelled";
+          return;
+        }
+      }
       const value = await runner({
         taskId: entry.id,
         stopEvent: entry.stopEvent,
@@ -321,7 +359,14 @@ export class TaskManager {
       if (value !== undefined) {
         entry.result = value;
       }
-      entry.status = entry.stopEvent.isSet() ? "cancelled" : "succeeded";
+      if (orderAlreadyCommitted(value)) {
+        entry.status = "succeeded";
+        if (entry.stopEvent.isSet()) {
+          this.pushProgress(entry, "确认点击已发出，请到订单页核对");
+        }
+      } else {
+        entry.status = entry.stopEvent.isSet() ? "cancelled" : "succeeded";
+      }
     } catch (exc) {
       entry.error = exc instanceof Error ? exc.message : String(exc);
       // 取消引发的异常（如 stopEvent 置位后的主动中止）归类为 cancelled 而非 failed
@@ -331,6 +376,9 @@ export class TaskManager {
       if (entry.cancelTimer !== null) {
         clearTimeout(entry.cancelTimer);
         entry.cancelTimer = null;
+      }
+      if (this.grabHolds.get(entry.deviceId) === entry.id) {
+        this.grabHolds.delete(entry.deviceId);
       }
       if (this.deviceLocks.get(entry.deviceId) === entry.id) {
         this.deviceLocks.delete(entry.deviceId);
@@ -370,6 +418,53 @@ export class TaskManager {
     }
   }
 
+  /** 候场到预热点。返回 true 表示取消了，调用方不得再占锁或执行任务。 */
+  private async waitToLock(entry: TaskEntry, lockAtUnixMs: number): Promise<boolean> {
+    this.pushProgress(entry, "候场，设备未占用");
+    const delayMs = lockAtUnixMs - Date.now();
+    if (delayMs > 0) {
+      const abort = new AbortController();
+      try {
+        const cancelled = await Promise.race([
+          entry.stopEvent.wait().then(() => true),
+          sleep(delayMs, undefined, { signal: abort.signal }).then(() => false),
+        ]);
+        if (cancelled || entry.stopEvent.isSet()) {
+          return true;
+        }
+      } finally {
+        abort.abort();
+      }
+    }
+    if (entry.stopEvent.isSet()) {
+      return true;
+    }
+    await this.takeDeviceLock(entry);
+    return entry.stopEvent.isSet();
+  }
+
+  /** 预热前取消同设备监控，等它退出后再占内存锁和跨进程锁。 */
+  private async takeDeviceLock(entry: TaskEntry): Promise<void> {
+    const holderId = this.deviceLocks.get(entry.deviceId);
+    if (holderId !== undefined && holderId !== entry.id) {
+      const holder = this.tasks.get(holderId);
+      if (holder?.kind === "monitor" && holder.endedAtUnixMs === null) {
+        this.cancel(holderId);
+        await this.whenSettled(holderId);
+      }
+    }
+    if (entry.stopEvent.isSet()) {
+      return;
+    }
+    const stillHeld = this.deviceLocks.get(entry.deviceId);
+    if (stillHeld !== undefined && stillHeld !== entry.id) {
+      throw new TaskConflictError(entry.deviceId, stillHeld);
+    }
+    this.lockfile?.acquire(entry.deviceId, entry.id);
+    this.deviceLocks.set(entry.deviceId, entry.id);
+    this.pushProgress(entry, "已占用设备");
+  }
+
   private pushProgress(entry: TaskEntry, line: string): void {
     entry.progress.push(line);
     entry.progressTotal += 1;
@@ -402,6 +497,19 @@ export class TaskManager {
       result: entry.result,
     };
   }
+}
+
+function orderAlreadyCommitted(value: unknown): boolean {
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+  const record = value as {
+    status?: unknown;
+    grab_result?: { status?: unknown } | null;
+  };
+  return [record.status, record.grab_result?.status].some(
+    (status) => status === "needs_action" || status === "submitted",
+  );
 }
 
 const SINGLETON_KEY = "__damaiWebTaskManager";

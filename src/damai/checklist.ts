@@ -16,17 +16,25 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { screenshot, swipe } from "../actions/actions";
+import { pressKey, screenshot, swipe } from "../actions/actions";
 import { formatPyFloat } from "../device/adb";
 import { DeviceManager } from "../device/manager";
 import { dumpUi } from "../inspector/dump";
 import type { UIElement } from "../inspector/models";
 import { logger } from "../utils/logging";
-import { NTP_SAMPLES, querySampled } from "../utils/ntp";
+import { querySampled, resolveClockOffset, type ClockFix } from "../utils/ntp";
+import { parseBeijingDateTime } from "../utils/beijingTime";
 
 // 与 Python 版一致：在模块顶层导入，测试经模块 mock（vi.mock）替换。
 import type { DamaiGrabOptions } from "./actions";
-import { damaiGrab, damaiLoginCheck, damaiOpenConcert, parseIso } from "./actions";
+import {
+  damaiGrab,
+  damaiLoginCheck,
+  damaiOpenConcert,
+  damaiReadPurchaseSheet,
+  orderedPriceLabels,
+} from "./actions";
+import { missingFrozenSelection } from "./purchaseSheet";
 
 /** 等待 open_time 期间状态 ping 的间隔（秒）。 */
 export const COUNTDOWN_TICK_SEC = 60;
@@ -52,8 +60,10 @@ export type ChecklistResultDict = {
   ntp_offset_ms: number | null;
   /** NTP 误差半宽（毫秒）= 最小 RTT / 2 + 分辨率；NTP 失败为 null。 */
   ntp_uncertainty_ms: number | null;
-  /** NTP 有效采样数；NTP 失败为 null。 */
+  /** NTP 有效采样数；NTP 失败或非 NTP 来源为 null。 */
   ntp_samples: number | null;
+  /** 校时来源：ntp / taobao / bilibili / manual；未校正为 null。 */
+  ntp_source: string | null;
   /** 开票判定方式（去抖门启用且有 open_time 时）："gate" | "timer"；其余为 null。 */
   sale_trigger: string | null;
 };
@@ -130,8 +140,10 @@ export class ChecklistResult {
   ntpOffsetMs: number | null;
   /** NTP 误差半宽（毫秒）= 最小 RTT / 2 + 分辨率；NTP 失败为 null。 */
   ntpUncertaintyMs: number | null;
-  /** NTP 有效采样数；NTP 失败为 null。 */
+  /** NTP 有效采样数；NTP 失败或非 NTP 来源为 null。 */
   ntpSamples: number | null;
+  /** 校时来源；未校正为 null。 */
+  ntpSource: string | null;
   /** 开票判定方式（去抖门启用且有 open_time 时）："gate" | "timer"；其余为 null。 */
   saleTrigger: string | null;
 
@@ -143,6 +155,7 @@ export class ChecklistResult {
     ntpOffsetMs?: number | null;
     ntpUncertaintyMs?: number | null;
     ntpSamples?: number | null;
+    ntpSource?: string | null;
     saleTrigger?: string | null;
   }) {
     this.status = init.status;
@@ -152,6 +165,7 @@ export class ChecklistResult {
     this.ntpOffsetMs = init.ntpOffsetMs ?? null;
     this.ntpUncertaintyMs = init.ntpUncertaintyMs ?? null;
     this.ntpSamples = init.ntpSamples ?? null;
+    this.ntpSource = init.ntpSource ?? null;
     this.saleTrigger = init.saleTrigger ?? null;
   }
 
@@ -169,6 +183,7 @@ export class ChecklistResult {
       ntp_offset_ms: this.ntpOffsetMs,
       ntp_uncertainty_ms: this.ntpUncertaintyMs,
       ntp_samples: this.ntpSamples,
+      ntp_source: this.ntpSource,
       sale_trigger: this.saleTrigger,
     };
   }
@@ -202,8 +217,8 @@ function daysInMonth(year: number, month: number): number {
 }
 
 /**
- * 按本地时区构造 Date，范围非法时抛 Python datetime 风格的错误
- * （"YYYY-MM-DD HH:MM:SS" 一律按本地时区解析，禁止用 Date(字符串) 直接解析）。
+ * 按北京时间构造 Date。范围非法时抛 Python datetime 风格的错误。
+ * 不读本机时区。
  */
 function buildStrictLocalDate(
   year: number,
@@ -229,19 +244,14 @@ function buildStrictLocalDate(
   if (second < 0 || second > 59) {
     throw new Error("second must be in 0..59");
   }
-  // 从 epoch 基准逐字段设置，规避 `new Date(year<100, ...)` 把年份解释为
-  // 1900+year 的行为
-  const d = new Date(0);
-  d.setFullYear(year, month - 1, day);
-  d.setHours(hour, minute, second, ms);
-  return d;
+  return new Date(Date.UTC(year, month - 1, day, hour - 8, minute, second, ms));
 }
 
 /**
  * 解析 'YYYY-MM-DD HH:MM:SS' 或 ISO 时间。open_time 为空 / "now" / "立即"
  * 时返回 null。
  *
- * 时间语义（迁移约定第 3 条）：所有分支均按**本地时区**解释字面墙钟分量——
+ * 时间语义：没有显式时区的墙钟按北京时间（UTC+8）解释。
  * 带 "+08:00" 之类偏移的 ISO 分支同样只取字面分量、丢弃偏移
  * （等价 Python `fromisoformat(...).replace(tzinfo=None)`）。
  *
@@ -255,9 +265,9 @@ export function parseOpenTime(openTime: string): Date | null {
   if (!openTime || ["", "now", "立即"].includes(openTime.toLowerCase())) {
     return null;
   }
-  // 格式 "%Y-%m-%d %H:%M:%S" —— 与 actions.parseIso 同一 strptime 格式，直接复用
+  // 格式 "%Y-%m-%d %H:%M:%S"，按北京时间。
   try {
-    return parseIso(openTime);
+    return parseBeijingDateTime(openTime);
   } catch {
     // 尝试下一格式
   }
@@ -793,6 +803,8 @@ export interface RunChecklistOptions {
   priceIndex?: number;
   /** 票档卡片全文。空串表示改用序号。 */
   priceLabel?: string;
+  /** 主档之后按顺序尝试的票档全文。最多 5 个，不含主档。 */
+  priceFallbacks?: readonly string[];
   /** 观演人姓名列表（大麦实名制）。 */
   viewerNames?: string[] | null;
   /** 购票张数。 */
@@ -803,6 +815,13 @@ export interface RunChecklistOptions {
   ntpServer?: string;
   /** NTP 超时（秒）。 */
   ntpTimeoutSec?: number;
+  /**
+   * 手动时钟修正（毫秒，服务器时间 − 本机时间）。
+   * 给出数字（含 0）时跳过自动校时。null/缺省则自动校时。
+   */
+  clockOffsetMs?: number | null;
+  /** 校时完成后的回调，供任务卡打出 offset / 误差 / 来源。 */
+  onClock?: ((fix: ClockFix) => void | Promise<void>) | null;
   /** 每个阶段开始时触发的异步回调。 */
   onPhase?: ((phase: string) => void | Promise<void>) | null;
   /** 每个倒计时 tick 触发的异步回调，参数为 (seconds_left, elapsed_s)。 */
@@ -811,7 +830,8 @@ export interface RunChecklistOptions {
    * 外部停止信号（web 控制台的取消按钮，计划 D9）：置位后，尚未开始的阶段
    * 被跳过，候场（countdownLoop / waitForSaleStart）在下一个检查点提前返回，
    * Phase 4 fire 不再执行，runChecklist 以 status="cancelled" 收敛。
-   * 已进入 grab_fire 的流程无法中断（grabOptions 的 60s 硬停止兜底）。
+   * grab_fire 期间 stopEvent 会传到 damaiGrab：确认点击发出前取消为 cancelled，
+   * 点击发出后为 needs_action。
    * 缺省 null = 行为与未传时逐字一致，既有调用方零影响。
    */
   stopEvent?: StopEvent | null;
@@ -839,6 +859,45 @@ export interface RunChecklistOptions {
  *
  * @returns {@link ChecklistResult}，含各阶段耗时与最终抢票结果。
  */
+const SHEET_NOT_OPEN_MARKERS = [
+  "找不到立即购买或预约入口",
+  "购买弹层里没有价格卡片",
+  "没有读出价格卡片",
+  "价格表未弹出",
+];
+
+/**
+ * 预热已打开详情时核对冻结文案。弹层打不开则记下并继续。
+ * 对得上之后按返回，把页面交回倒计时。
+ */
+async function assertFrozenSelection(
+  deviceId: string,
+  itemId: string,
+  sessionLabel: string,
+  priceLabels: readonly string[],
+): Promise<void> {
+  let sheet;
+  try {
+    sheet = await damaiReadPurchaseSheet(deviceId, itemId);
+  } catch (exc) {
+    const message = excToStr(exc);
+    if (SHEET_NOT_OPEN_MARKERS.some((marker) => message.includes(marker))) {
+      logger.info(`[checklist] 购买弹层未打开，开抢时再按冻结文案点选: ${message}`);
+      return;
+    }
+    throw exc;
+  }
+  const missing = missingFrozenSelection(sheet, sessionLabel, priceLabels);
+  try {
+    await pressKey(deviceId, "back");
+  } catch (exc) {
+    logger.warning(`[checklist] 预热校验后返回失败: ${excToStr(exc)}`);
+  }
+  if (missing !== null) {
+    throw new Error(missing);
+  }
+}
+
 export async function runChecklist(
   deviceId: string,
   itemId: string,
@@ -848,11 +907,14 @@ export async function runChecklist(
     sessionLabel = "",
     priceIndex = 1,
     priceLabel = "",
+    priceFallbacks = [],
     viewerNames = null,
     ticketNum = 1,
     preheatSeconds = DEFAULT_PREHEAT_SECONDS,
     ntpServer = "pool.ntp.org",
     ntpTimeoutSec = 5.0,
+    clockOffsetMs = null,
+    onClock = null,
     onPhase = null,
     onProgress = null,
     stopEvent = null,
@@ -877,29 +939,61 @@ export async function runChecklist(
     ev.finishedAtMs = nowMs();
   };
 
-  // ---- Phase -1: NTP 同步（尽力而为；多次采样取最小 RTT）----
-  // timeout 语义 = 每个样本的超时；最坏时延 3 × ntpTimeoutSec（默认 15s），
-  // Phase -1 为尽力而为阶段，可接受。失败时回退为无修正继续（旧行为）。
-  const pNtp = begin("ntp_sync", `server=${ntpServer}`);
-  try {
-    const ntpRes = await querySampled(ntpServer, ntpTimeoutSec);
-    result.ntpOffsetMs = ntpRes.offsetMs;
-    result.ntpUncertaintyMs = ntpRes.uncertaintyMs;
-    result.ntpSamples = ntpRes.samples;
+  if (stopEvent !== null && stopEvent.isSet()) {
+    result.status = "cancelled";
+    result.error = "cancelled_by_user: 用户在候场前取消";
+    return result;
+  }
+
+  const scheduled = openTime !== "" && !["now", "立即"].includes(openTime.toLowerCase());
+  // ---- Phase -1: 校时。有开票时间时失败即停，不再把 offset 当成 0。 ----
+  const pNtp = begin("ntp_sync", clockOffsetMs === null ? `server=${ntpServer}` : "manual");
+  let clock: ClockFix | null = null;
+  if (clockOffsetMs !== null) {
+    clock = {
+      offsetMs: clockOffsetMs,
+      uncertaintyMs: null,
+      samples: null,
+      source: "manual",
+    };
+  } else if (scheduled) {
+    try {
+      clock = await resolveClockOffset({
+        ntp: () => querySampled(ntpServer, ntpTimeoutSec),
+      });
+    } catch (exc) {
+      end(pNtp);
+      result.status = "failed";
+      result.error = `未校正时钟，已停止候场。请填写手动修正值（毫秒）或稍后重试（${excToStr(exc)}）`;
+      return result;
+    }
+  } else {
+    try {
+      clock = await resolveClockOffset({
+        ntp: () => querySampled(ntpServer, ntpTimeoutSec),
+      });
+    } catch (exc) {
+      logger.warning(`[checklist] 立即开抢，校时失败后继续: ${excToStr(exc)}`);
+    }
+  }
+  if (clock !== null) {
+    result.ntpOffsetMs = clock.offsetMs;
+    result.ntpUncertaintyMs = clock.uncertaintyMs;
+    result.ntpSamples = clock.samples;
+    result.ntpSource = clock.source;
     logger.info(
-      `[checklist] NTP offset=${signed2(ntpRes.offsetMs)}ms delay=${ntpRes.roundTripMs.toFixed(2)}ms ` +
-        `uncertainty=${ntpRes.uncertaintyMs.toFixed(2)}ms samples=${ntpRes.samples}/${NTP_SAMPLES}`,
+      `[checklist] clock source=${clock.source} offset=${signed2(clock.offsetMs)}ms ` +
+        `uncertainty=${clock.uncertaintyMs === null ? "n/a" : clock.uncertaintyMs.toFixed(2)}ms`,
     );
-  } catch (exc) {
-    logger.warning(`[checklist] NTP sync failed (continuing without): ${excToStr(exc)}`);
+    if (onClock !== null) {
+      await safeCb(onClock, clock);
+    }
   }
   end(pNtp);
 
   const parsed = parseOpenTime(openTime);
-  // 开票时刻按 NTP offset 换算到本机时钟：服务器时刻到达 W 的瞬间，本机钟
-  // 读到 W − offsetMs/1000（offsetMs = server − local，正=服务器超前；公式
-  // 约定见 utils/ntp.ts 的单臂推导，等价 clock.rs 的 target − offset − local）。
-  // NTP 失败时 offset = 0，targetUnix 与未修正的旧行为逐字一致。
+  // 开票时刻按 offset 换算到本机时钟：服务器时刻到达 W 的瞬间，本机钟
+  // 读到 W − offsetMs/1000（offsetMs = server − local，正=服务器超前）。
   const ntpOffset = result.ntpOffsetMs ?? 0;
   let targetUnix: number | null = null;
   if (parsed !== null) {
@@ -944,6 +1038,8 @@ export async function runChecklist(
     sessionIndex,
     sessionLabel,
     priceLabel,
+    priceFallbacks,
+    stopEvent,
   };
 
   if (targetUnix !== null && preheatSeconds > 0) {
@@ -959,6 +1055,20 @@ export async function runChecklist(
     const p2 = begin("preheat_open", `preheat_seconds=${formatPyFloat(preheatSeconds)}`);
     await damaiOpenConcert(deviceId, itemId);
     end(p2);
+
+    const frozenLabels = orderedPriceLabels(priceLabel, priceFallbacks);
+    if (sessionLabel.trim() !== "" || frozenLabels.length > 0) {
+      const pFreeze = begin("freeze_check");
+      try {
+        await assertFrozenSelection(deviceId, itemId, sessionLabel, frozenLabels);
+      } catch (exc) {
+        end(pFreeze);
+        result.status = "failed";
+        result.error = `frozen_selection: ${excToStr(exc)}`;
+        return result;
+      }
+      end(pFreeze);
+    }
 
     // ---- Phase 2.5: 并行 dump 预热 ----
     // 预热期间并行地刷 UI dump + 截屏，让开票瞬间屏幕在 OS 缓存里已经

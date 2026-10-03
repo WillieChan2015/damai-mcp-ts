@@ -1,6 +1,6 @@
-/** 抢票开票时间：`YYYY-MM-DD HH:MM:SS`（本地时区，空串 = 立即抢）。 */
+/** 抢票开票时间：`YYYY-MM-DD HH:MM:SS`（北京时间，空串 = 立即抢）。 */
 export type OpenTimeFormat = "open-time";
-/** 监控起止：`YYYY-MM-DDTHH:mm`（datetime-local，本地时区）。 */
+/** 监控起止：`YYYY-MM-DDTHH:mm`（datetime-local，北京时间）。 */
 export type DateTimeLocalFormat = "datetime-local";
 export type DateTimeValueFormat = OpenTimeFormat | DateTimeLocalFormat;
 

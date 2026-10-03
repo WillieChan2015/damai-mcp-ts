@@ -14,6 +14,22 @@ const STAGES = [
   { id: "human", label: "待人工确认" },
 ];
 
+function clockSummary(result: unknown): string | null {
+  if (result === null || typeof result !== "object") {
+    return null;
+  }
+  const record = result as {
+    ntp_source?: unknown;
+    ntp_offset_ms?: unknown;
+    ntp_uncertainty_ms?: unknown;
+  };
+  if (record.ntp_source == null && record.ntp_offset_ms == null) {
+    return null;
+  }
+  const uncertainty = record.ntp_uncertainty_ms == null ? "n/a" : String(record.ntp_uncertainty_ms);
+  return `校时 source=${String(record.ntp_source ?? "未校正")} offset=${String(record.ntp_offset_ms ?? "—")}ms uncertainty=${uncertainty}ms`;
+}
+
 /**
  * 任务实时进度查看器（SSE）。
  * 顶部渲染 6 步流水线指示器，下方为终端式日志窗口。
@@ -210,6 +226,12 @@ export function ProgressViewer({ taskId }: { taskId: string | null }) {
       </div>
 
       {/* 结构化返回值展开 */}
+      {clockSummary(finalResult) ? (
+        <p className="rounded border border-line bg-surface px-3 py-2 font-mono text-[11px] text-ink">
+          {clockSummary(finalResult)}
+        </p>
+      ) : null}
+
       {finalResult != null ? (
         <details className="rounded border border-line bg-surface p-3 text-xs text-muted">
           <summary className="cursor-pointer font-medium text-ink hover:text-accent">

@@ -24,6 +24,7 @@ import {
   parseTransmitTs,
   query,
   querySampled,
+  resolveClockOffset,
 } from "../src/utils/ntp";
 import { FakeUdpSocket, captureRejection, fakeNtpResponse, type SentPacket } from "./helpers";
 
@@ -498,5 +499,23 @@ describe("querySampled（样本有效性门槛）", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("NTP 失败后改用淘宝公共时间，不带 Cookie", async () => {
+    const sent = Date.now();
+    const server = sent + 2500;
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.headers).toBeDefined();
+      expect(JSON.stringify(init?.headers)).not.toMatch(/cookie/i);
+      return new Response(JSON.stringify({ data: { t: String(server) } }), { status: 200 });
+    });
+    const fix = await resolveClockOffset({
+      ntp: async () => {
+        throw new Error("ntp down");
+      },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(fix.source).toBe("taobao");
+    expect(Math.abs(fix.offsetMs - 2500)).toBeLessThan(1000);
   });
 });

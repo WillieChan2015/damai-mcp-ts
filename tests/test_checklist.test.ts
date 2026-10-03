@@ -5,7 +5,9 @@
  * - `damai/actions`（对应 Python monkeypatch `checklist.damai_grab` 等模块属性；
  *   TS 的 ESM 具名导入不可变，改为在来源模块上用 vi.mock 打桩）；
  * - `utils/ntp`（Python 版允许真实 NTP 查询在测试里失败后继续；TS 侧直接把
- *   `querySampled` mock 成立即失败，既保持「无 NTP 也继续」的路径又避免触网；
+ *   `querySampled` mock 成立即失败，`fetch` 也桩成失败，避免触网。
+ *   有开票时间且未填 clockOffsetMs 时，校时失败会停在 failed。
+ *   需要沿用「offset 0 继续候场」的用例显式传 clockOffsetMs: 0。
  *   需要 NTP 生效的用例再用 mockResolvedValue 提供确定性的采样结果）；
  * - `DeviceManager.shared`（对应 Python monkeypatch 该 classmethod 返回
  *   `_FakeDeviceManager`，用 vi.spyOn 静态方法实现）。
@@ -41,6 +43,8 @@ const {
   dumpUiMock,
   swipeMock,
   screenshotMock,
+  pressKeyMock,
+  readSheetMock,
 } = vi.hoisted(() => ({
   /** `damai/actions.damaiGrab` 桩。 */
   grabMock: vi.fn<(...args: unknown[]) => Promise<Record<string, unknown>>>(),
@@ -58,6 +62,8 @@ const {
   swipeMock: vi.fn<(...args: unknown[]) => Promise<void>>(),
   /** `actions/actions.screenshot` 桩（预热 warm dump 用，避免触达真实 adb）。 */
   screenshotMock: vi.fn<(...args: unknown[]) => Promise<Buffer>>(),
+  pressKeyMock: vi.fn<(...args: unknown[]) => Promise<void>>(),
+  readSheetMock: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
 }));
 
 vi.mock("../src/damai/actions", async (importOriginal) => {
@@ -67,6 +73,7 @@ vi.mock("../src/damai/actions", async (importOriginal) => {
     damaiGrab: grabMock,
     damaiLoginCheck: loginMock,
     damaiOpenConcert: openMock,
+    damaiReadPurchaseSheet: readSheetMock,
   };
 });
 vi.mock("../src/utils/ntp", async (importOriginal) => {
@@ -81,7 +88,7 @@ vi.mock("../src/inspector/dump", async (importOriginal) => {
 });
 vi.mock("../src/actions/actions", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/actions/actions")>();
-  return { ...actual, swipe: swipeMock, screenshot: screenshotMock };
+  return { ...actual, swipe: swipeMock, screenshot: screenshotMock, pressKey: pressKeyMock };
 });
 
 beforeEach(() => {
@@ -102,9 +109,17 @@ beforeEach(() => {
 
   // NTP 同步为尽力而为：桩成立即失败，走「无 NTP 继续」分支
   querySampledMock.mockRejectedValue(new Error("NTP 在测试中被 mock 禁用"));
+  readSheetMock.mockRejectedValue(new Error("购买弹层里没有价格卡片"));
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      throw new Error("fetch 在测试中被禁用");
+    }),
+  );
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   // 恢复 DeviceManager.shared 原实现
   vi.restoreAllMocks();
 });
@@ -118,15 +133,15 @@ describe("parse_open_time", () => {
     expect(parseOpenTime("立即")).toBeNull();
   });
 
-  it("带空格的 YYYY-MM-DD HH:MM:SS", () => {
+  it("带空格的 YYYY-MM-DD HH:MM:SS 按北京时间", () => {
     const dt = parseOpenTime("2026-07-20 10:00:00");
-    expect(dt?.getTime()).toBe(new Date(2026, 6, 20, 10, 0, 0).getTime());
+    expect(dt?.getTime()).toBe(Date.UTC(2026, 6, 20, 2, 0, 0));
   });
 
-  // Python @pytest.mark.parametrize("fmt", ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"])
   it.each(["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"])("round trip（%s）", (fmt) => {
-    const s = strftime(fmt, new Date(2026, 6, 20, 10, 30, 45));
-    expect(parseOpenTime(s)?.getTime()).toBe(new Date(2026, 6, 20, 10, 30, 45).getTime());
+    const unix = Date.UTC(2026, 6, 20, 2, 30, 45);
+    const s = formatBeijing(unix, fmt.includes("T") ? "T" : " ");
+    expect(parseOpenTime(s)?.getTime()).toBe(unix);
   });
 
   it("无法解析时抛 ValueError", () => {
@@ -134,18 +149,13 @@ describe("parse_open_time", () => {
   });
 });
 
-/** 测试本地 strftime：只实现上面参数化用到的两个格式（按本地时区取分量）。 */
-function strftime(fmt: string, d: Date): string {
+/** 把 Unix 毫秒格式化成北京时间墙钟，不读本机时区。 */
+function formatBeijing(unixMs: number, sep: " " | "T" = " "): string {
+  const shifted = new Date(unixMs + 8 * 60 * 60 * 1000);
   const p2 = (n: number): string => String(n).padStart(2, "0");
-  const ymd = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
-  const hms = `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
-  if (fmt === "%Y-%m-%dT%H:%M:%S") {
-    return `${ymd}T${hms}`;
-  }
-  if (fmt === "%Y-%m-%d %H:%M:%S") {
-    return `${ymd} ${hms}`;
-  }
-  throw new Error(`未实现的 strftime 格式: ${fmt}`);
+  const ymd = `${shifted.getUTCFullYear()}-${p2(shifted.getUTCMonth() + 1)}-${p2(shifted.getUTCDate())}`;
+  const hms = `${p2(shifted.getUTCHours())}:${p2(shifted.getUTCMinutes())}:${p2(shifted.getUTCSeconds())}`;
+  return sep === "T" ? `${ymd}T${hms}` : `${ymd} ${hms}`;
 }
 
 // ---- 倒计时循环 ----------------------------------------------------------------
@@ -494,9 +504,10 @@ describe("run_checklist（open_time + 去抖门）", () => {
     screenshotMock.mockResolvedValue(Buffer.alloc(0));
 
     // strftime 只保留整秒：+2s 保证截断后目标仍至少 1s 在未来（确定性强）
-    const openTime = strftime("%Y-%m-%d %H:%M:%S", new Date(Date.now() + 2000));
+    const openTime = formatBeijing(Date.now() + 2000);
     const res = await runChecklist("127.0.0.1:5555", "1", {
       openTime,
+      clockOffsetMs: 0,
       priceIndex: 1,
       viewerNames: ["张三"],
       // 小轮询间隔：让基线段（min(3s, 距开票) 窗口）容得下 3 次观察
@@ -527,6 +538,7 @@ describe("run_checklist（open_time + 去抖门）", () => {
 
     const res = await runChecklist("127.0.0.1:5555", "1", {
       openTime: "2020-01-01 10:00:00", // 已过去 → 立即到点
+      clockOffsetMs: 0,
       signalGateDisabled: true,
     });
 
@@ -572,9 +584,10 @@ describe("run_checklist（open_time + 去抖门）", () => {
     let stopped = false;
     const t0Ms = Date.now();
     const stopEvent: StopEvent = { isSet: () => stopped || Date.now() - t0Ms > 2000 };
-    const openTime = strftime("%Y-%m-%d %H:%M:%S", new Date(Date.now() + 8000));
+    const openTime = formatBeijing(Date.now() + 8000);
     const res = await runChecklist("127.0.0.1:5555", "1", {
       openTime,
+      clockOffsetMs: 0,
       preheatSeconds: 3,
       signalGateOptions: { gatePollMs: 5 },
       stopEvent,
@@ -614,7 +627,7 @@ describe("run_checklist（open_time + 去抖门）", () => {
     );
 
     // strftime 截断到整秒：目标 ≥ 5s 在未来，给候场 + 修正触发留足余量
-    const openTime = strftime("%Y-%m-%d %H:%M:%S", new Date(Date.now() + 5000));
+    const openTime = formatBeijing(Date.now() + 5000);
     const uncorrectedTargetMs = parseOpenTime(openTime)!.getTime();
     const res = await runChecklist("127.0.0.1:5555", "1", {
       openTime,
@@ -641,37 +654,22 @@ describe("run_checklist（open_time + 去抖门）", () => {
     expect(grabAtMs).toBeLessThan(uncorrectedTargetMs - 1500);
   });
 
-  it("NTP 失败时行为回归：offset 不应用（targetUnix 不平移），NTP 字段为 null", async () => {
+  it("校时全部失败时有开票时间的任务停在失败，不再把 offset 当成 0", async () => {
     loginMock.mockResolvedValue({ logged_in: true });
-    openMock.mockResolvedValue({ item_id: "1", loaded: true, elapsed_ms: 0 });
-    let grabAtMs = 0;
-    grabMock.mockImplementation(async () => {
-      grabAtMs = Date.now();
-      return { status: "submitted", elapsed_ms: 1, item_id: "1" };
-    });
-    dumpUiMock.mockResolvedValue([]);
-    screenshotMock.mockResolvedValue(Buffer.alloc(0));
-    swipeMock.mockResolvedValue(undefined);
+    grabMock.mockResolvedValue({ status: "submitted", elapsed_ms: 1, item_id: "1" });
     querySampledMock.mockRejectedValue(new Error("NTP 不可达"));
 
-    const openTime = strftime("%Y-%m-%d %H:%M:%S", new Date(Date.now() + 2000));
-    const targetMs = parseOpenTime(openTime)!.getTime();
+    const openTime = formatBeijing(Date.now() + 2000);
     const res = await runChecklist("127.0.0.1:5555", "1", {
       openTime,
       preheatSeconds: 0.05,
-      signalGateOptions: { gatePollMs: 5, fallbackAfterMs: 0 },
     });
 
-    expect(res.status).toBe("submitted");
+    expect(res.status).toBe("failed");
+    expect(res.error).toContain("未校正");
+    expect(grabMock).not.toHaveBeenCalled();
     expect(res.ntpOffsetMs).toBeNull();
-    const d = res.toDict();
-    expect(d["ntp_offset_ms"]).toBeNull();
-    expect(d["ntp_uncertainty_ms"]).toBeNull();
-    expect(d["ntp_samples"]).toBeNull();
-    expect(d["sale_trigger"]).toBe("timer");
-    expect(grabMock.mock.calls[0]?.[5]).toBe("");
-    // 无修正：定时器兜底在未修正目标处触发（不会提前于目标 − 50ms）
-    expect(grabAtMs).toBeGreaterThanOrEqual(targetMs - 50);
+    expect(res.ntpSource).toBeNull();
   });
 
   it("门提前确认（提前开售场景）：damaiGrab 立即被调，不睡到未修正 T0", async () => {
@@ -704,7 +702,7 @@ describe("run_checklist（open_time + 去抖门）", () => {
       }),
     );
 
-    const openTime = strftime("%Y-%m-%d %H:%M:%S", new Date(Date.now() + 5000));
+    const openTime = formatBeijing(Date.now() + 5000);
     const uncorrectedTargetMs = parseOpenTime(openTime)!.getTime();
     const res = await runChecklist("127.0.0.1:5555", "1", {
       openTime,
@@ -722,5 +720,39 @@ describe("run_checklist（open_time + 去抖门）", () => {
     // 未修正行为下门确认点 ≈ 未修正 T0，必越界
     expect(grabAtMs).toBeGreaterThan(uncorrectedTargetMs - 3200);
     expect(grabAtMs).toBeLessThan(uncorrectedTargetMs - 1500);
+  });
+
+  it("预热能打开弹层时，冻结文案对不上就在开票前失败", async () => {
+    loginMock.mockResolvedValue({ logged_in: true });
+    openMock.mockResolvedValue({ item_id: "1", loaded: true, elapsed_ms: 0 });
+    readSheetMock.mockResolvedValue({
+      sessions: [{ label: "2026-10-18 周日 19:30", picked: false }],
+      prices: [{ label: "看台488元", soldOut: false, picked: false }],
+    });
+    pressKeyMock.mockResolvedValue(undefined);
+    const res = await runChecklist("127.0.0.1:5555", "1", {
+      openTime: formatBeijing(Date.now() + 60_000),
+      clockOffsetMs: 0,
+      preheatSeconds: 5,
+      priceLabel: "内场988元",
+    });
+    expect(res.status).toBe("failed");
+    expect(res.error).toContain("内场988元");
+    expect(pressKeyMock).toHaveBeenCalled();
+    expect(grabMock).not.toHaveBeenCalled();
+  });
+
+  it("手动校时跳过自动校时", async () => {
+    loginMock.mockResolvedValue({ logged_in: true });
+    grabMock.mockResolvedValue({ status: "ready_for_human", elapsed_ms: 1, item_id: "1" });
+    querySampledMock.mockRejectedValue(new Error("NTP 不可达"));
+    const res = await runChecklist("127.0.0.1:5555", "1", {
+      openTime: "",
+      clockOffsetMs: 120,
+    });
+    expect(res.status).toBe("ready_for_human");
+    expect(res.ntpSource).toBe("manual");
+    expect(res.ntpOffsetMs).toBe(120);
+    expect(querySampledMock).not.toHaveBeenCalled();
   });
 });

@@ -36,6 +36,7 @@ const monitorFormSchema = z.object({
   startAt: z.string(),
   endAt: z.string(),
   openPage: z.boolean(),
+  priceLabels: z.string(),
 });
 
 type MonitorFormValues = z.infer<typeof monitorFormSchema>;
@@ -53,6 +54,7 @@ export function MonitorForm({ devices }: { devices: MonitorDeviceOption[] }) {
       startAt: "",
       endAt: "",
       openPage: true,
+      priceLabels: "",
     },
   });
 
@@ -67,6 +69,10 @@ export function MonitorForm({ devices }: { devices: MonitorDeviceOption[] }) {
       openPage: values.openPage,
       startAt: values.startAt ? values.startAt : undefined,
       endAt: values.endAt ? values.endAt : undefined,
+      priceLabels: values.priceLabels
+        .split(/[,，]/)
+        .map((label) => label.trim())
+        .filter((label) => label.length > 0),
     });
     if (result.serverError) {
       setError(result.serverError);
@@ -105,6 +111,10 @@ export function MonitorForm({ devices }: { devices: MonitorDeviceOption[] }) {
           itemError={form.formState.errors.itemId?.message}
         />
       </div>
+      <div className="sm:col-span-2">
+        <label className={labelCls}>票档（逗号分隔，留空则看整页）</label>
+        <Input {...form.register("priceLabels")} placeholder="内场988元，看台488元" className="mt-1" />
+      </div>
       <div>
         <label className={labelCls}>轮询间隔（秒，5-3600）</label>
         <Input
@@ -114,7 +124,7 @@ export function MonitorForm({ devices }: { devices: MonitorDeviceOption[] }) {
         />
       </div>
       <div>
-        <label className={labelCls}>开始时间（留空 = 立即采样）</label>
+        <label className={labelCls}>开始时间（北京时间，留空 = 立即采样）</label>
         <Controller
           control={form.control}
           name="startAt"
@@ -130,7 +140,7 @@ export function MonitorForm({ devices }: { devices: MonitorDeviceOption[] }) {
         />
       </div>
       <div>
-        <label className={labelCls}>截止时间（留空 = 不设截止）</label>
+        <label className={labelCls}>截止时间（北京时间，留空 = 不设截止）</label>
         <Controller
           control={form.control}
           name="endAt"

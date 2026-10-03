@@ -5,8 +5,9 @@
  * Swift 源码内嵌在这里。`new URL("./xx.swift", import.meta.url)` 会被 Next
  * 收成静态资源，服务端拿到的不是磁盘路径，swift 起不来。
  */
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -14,6 +15,36 @@ import { promisify } from "node:util";
 import type { OcrBox } from "../damai/purchaseSheet";
 
 const execFileAsync = promisify(execFile);
+
+let visionBinary: Promise<string> | null = null;
+
+/** 编译一次再复用。每次 `swift` 解释脚本都要冷启动编译器。 */
+function compiledVisionBinary(): Promise<string> {
+  if (visionBinary === null) {
+    visionBinary = compileVisionBinary().catch((exc: unknown) => {
+      visionBinary = null;
+      throw exc;
+    });
+  }
+  return visionBinary;
+}
+
+async function compileVisionBinary(): Promise<string> {
+  const dir = join(tmpdir(), "damai-vision-ocr");
+  await mkdir(dir, { recursive: true });
+  const hash = createHash("sha256").update(VISION_SWIFT).digest("hex").slice(0, 16);
+  const binary = join(dir, `ocr-${hash}`);
+  try {
+    await access(binary);
+    return binary;
+  } catch {
+    // 还没编译过，或上次的产物被清掉了。
+  }
+  const source = join(dir, "vision-ocr.swift");
+  await writeFile(source, VISION_SWIFT);
+  await execFileAsync("/usr/bin/swiftc", ["-o", binary, source], { timeout: 60_000 });
+  return binary;
+}
 
 const VISION_SWIFT = `import Foundation
 import Vision
@@ -82,12 +113,11 @@ export async function recognizeTextBoxes(png: Buffer): Promise<OcrBox[]> {
   }
   const dir = await mkdtemp(join(tmpdir(), "damai-ocr-"));
   const pngPath = join(dir, "screen.png");
-  const scriptPath = join(dir, "vision-ocr.swift");
   try {
     await writeFile(pngPath, png);
-    await writeFile(scriptPath, VISION_SWIFT);
-    const { stdout } = await execFileAsync("/usr/bin/swift", [scriptPath, pngPath], {
-      timeout: 30_000,
+    const binary = await compiledVisionBinary();
+    const { stdout } = await execFileAsync(binary, [pngPath], {
+      timeout: 20_000,
       maxBuffer: 2 * 1024 * 1024,
     });
     return parseOcrOutput(stdout);

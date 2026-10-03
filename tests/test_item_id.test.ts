@@ -208,14 +208,12 @@ describe("readCurrentDamaiItem", () => {
   });
 
   it("详情 Intent 没有编号时读 logcat 里的 item_id", async () => {
-    shellMock
-      .mockResolvedValueOnce(
-        `* Hist #0: ActivityRecord{1 u0 cn.damai/.trade.newtradeorder.ui.projectdetail.ui.activity.ProjectDetailActivity t1}
+    shellMock.mockResolvedValueOnce(
+      `* Hist #0: ActivityRecord{1 u0 cn.damai/.trade.newtradeorder.ui.projectdetail.ui.activity.ProjectDetailActivity t1}
       app=ProcessRecord{abc 21334:cn.damai/u0a382}
       Intent { dat=damai://projectdetail (has extras) }
 `,
-      )
-      .mockResolvedValueOnce("");
+    );
     adbMock.mockResolvedValueOnce({
       stdout: `10-03 16:54:58.037 21334 27092 I x-n-x : updateEvent:{"args":{"item_id":"${ITEM}"},"pageName":"page_product_detail","key":"ProjectDetailActivity"}`,
       stderr: "",
@@ -225,6 +223,7 @@ describe("readCurrentDamaiItem", () => {
       itemId: ITEM,
     });
     expect(adbMock.mock.calls[0]?.slice(0, 3)).toEqual(["logcat", "-d", "-e"]);
+    expect(shellMock).toHaveBeenCalledTimes(1);
     expect(dumpUiMock).toHaveBeenCalled();
   });
 

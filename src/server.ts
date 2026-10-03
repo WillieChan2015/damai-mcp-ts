@@ -736,9 +736,10 @@ export function createMcpServer(): McpServer {
         "    session_label: 场次卡片全文。空串表示改用序号。\n" +
         "    price_index: 票档序号（1-based）。price_label 非空时忽略。\n" +
         "    price_label: 票档卡片全文。空串表示改用序号。\n" +
-        "    viewer_names: 观演人姓名列表。\n" +
-        "    ticket_num: 张数。\n" +
-        '    open_time: 开票时间 "YYYY-MM-DD HH:MM:SS"（空=立即抢）。\n' +
+        "    price_fallbacks: 主档之后按顺序尝试的票档全文，不含主档，最多 5 个。\n" +
+        "    viewer_names: 观演人姓名列表。人数必须等于 ticket_num。\n" +
+        "    ticket_num: 张数（1-6）。大于 1 时在购买弹层点增加并读回。\n" +
+        '    open_time: 开票时间 "YYYY-MM-DD HH:MM:SS"（北京时间；空=立即抢）。\n' +
         "    preheat_seconds: 开票前多少秒开始预热（默认 30）。\n" +
         "    max_runtime_sec: 整个流程最大耗时（默认 600 秒；现为硬停止——\n" +
         "        预热/开票等待与重试循环超限即中止并报「已达最大运行时长」）。\n" +
@@ -760,8 +761,9 @@ export function createMcpServer(): McpServer {
         session_label: z.string().default(""),
         price_index: z.number().int().default(1),
         price_label: z.string().default(""),
+        price_fallbacks: z.array(z.string()).max(5).default([]),
         viewer_names: z.array(z.string()).nullable().default(null),
-        ticket_num: z.number().int().default(1),
+        ticket_num: z.number().int().min(1).max(6).default(1),
         open_time: z.string().default(""),
         preheat_seconds: z.number().default(30.0),
         max_runtime_sec: z.number().default(600.0),
@@ -780,6 +782,7 @@ export function createMcpServer(): McpServer {
       session_label,
       price_index,
       price_label,
+      price_fallbacks,
       viewer_names,
       ticket_num,
       open_time,
@@ -807,6 +810,7 @@ export function createMcpServer(): McpServer {
             sessionIndex: session_index,
             sessionLabel: session_label,
             priceLabel: price_label,
+            priceFallbacks: price_fallbacks,
           },
         ),
       );
@@ -958,15 +962,17 @@ export function createMcpServer(): McpServer {
         "Args:\n" +
         "    device_id: 设备 ID。\n" +
         "    item_id: 大麦 item id。\n" +
-        "    open_time: 开票时间 'YYYY-MM-DD HH:MM:SS'（空=立即抢）。\n" +
+        "    open_time: 开票时间 'YYYY-MM-DD HH:MM:SS'（北京时间；空=立即抢）。\n" +
         "    session_index: 场次序号（1-based）。session_label 非空时忽略。\n" +
         "    session_label: 场次卡片全文。空串表示改用序号。\n" +
         "    price_index: 票档序号（1-based）。price_label 非空时忽略。\n" +
         "    price_label: 票档卡片全文。空串表示改用序号。\n" +
-        "    viewer_names: 观演人姓名列表。\n" +
-        "    ticket_num: 张数。\n" +
+        "    price_fallbacks: 主档之后按顺序尝试的票档全文，不含主档，最多 5 个。\n" +
+        "    viewer_names: 观演人姓名列表。人数必须等于 ticket_num。\n" +
+        "    ticket_num: 张数（1-6）。\n" +
         "    preheat_seconds: 开票前多少秒开始预热（默认 30）。\n" +
-        "    ntp_server: NTP 服务器（默认 pool.ntp.org；国内用 cn.pool.ntp.org）。\n\n" +
+        "    ntp_server: NTP 服务器（默认 pool.ntp.org；国内用 cn.pool.ntp.org）。\n" +
+        "    clock_offset_ms: 手动时钟修正毫秒。给出数字（含 0）时跳过自动校时。\n\n" +
         "同一设备同时只允许一个监控/抢票任务（设备被占用时立即报错）。",
       inputSchema: {
         device_id: z.string(),
@@ -976,10 +982,12 @@ export function createMcpServer(): McpServer {
         session_label: z.string().default(""),
         price_index: z.number().int().default(1),
         price_label: z.string().default(""),
+        price_fallbacks: z.array(z.string()).max(5).default([]),
         viewer_names: z.array(z.string()).nullable().default(null),
-        ticket_num: z.number().int().default(1),
+        ticket_num: z.number().int().min(1).max(6).default(1),
         preheat_seconds: z.number().default(30.0),
         ntp_server: z.string().default("pool.ntp.org"),
+        clock_offset_ms: z.number().nullable().default(null),
       },
       outputSchema: DICT_OUTPUT,
     },
@@ -991,10 +999,12 @@ export function createMcpServer(): McpServer {
       session_label,
       price_index,
       price_label,
+      price_fallbacks,
       viewer_names,
       ticket_num,
       preheat_seconds,
       ntp_server,
+      clock_offset_ms,
     }) => {
       const phaseCb = async (name: string): Promise<void> => {
         logger.info(`[checklist] ▶ ${name}`);
@@ -1016,10 +1026,12 @@ export function createMcpServer(): McpServer {
           sessionLabel: session_label,
           priceIndex: price_index,
           priceLabel: price_label,
+          priceFallbacks: price_fallbacks,
           viewerNames: viewer_names ?? [],
           ticketNum: ticket_num,
           preheatSeconds: preheat_seconds,
           ntpServer: ntp_server,
+          clockOffsetMs: clock_offset_ms,
           onPhase: phaseCb,
           onProgress: progressCb,
         }),
@@ -1037,8 +1049,9 @@ export function createMcpServer(): McpServer {
       description:
         "只读监控大麦详情页余票状态：判定 available/not_on_sale/sold_out/unknown；" +
         "**绝不点击购买、绝不提交订单**。\n\n" +
-        "轮询 uiautomator dump 并把页面证据折叠为四态；发现可购 CTA（如「立即购买」）" +
-        "立即返回 found=true；dump 连续失败自动指数退避并停止。\n\n" +
+        "轮询 uiautomator dump 并把页面证据折叠为四态。未传 price_labels 时，" +
+        "发现可购 CTA（如「立即购买」）立即返回 found=true；传入票档全文后只认列表中" +
+        "第一张可见且未缺货的卡片。dump 连续失败自动指数退避并停止。\n\n" +
         "Args:\n" +
         "    device_id: 设备 ID。\n" +
         "    item_id: 大麦 item id（数字字符串）。\n" +
@@ -1046,7 +1059,8 @@ export function createMcpServer(): McpServer {
         "    max_attempts: 最大尝试次数（0=无限；工具层默认 720，避免调用方忘记终止）。\n" +
         "    max_consecutive_errors: dump 连续失败多少次后停止（默认 5）。\n" +
         "    open_page: 开始时是否深链打开详情页（默认 true；属导航非点击，只执行一次）。\n" +
-        "    deadline_unix_ms: 墙钟截止（Unix 毫秒），到达即停 timeout；null=不设截止。\n\n" +
+        "    deadline_unix_ms: 墙钟截止（Unix 毫秒），到达即停 timeout；null=不设截止。\n" +
+        "    price_labels: 有序票档全文。非空时只认这些档，不用整页购买按钮。\n\n" +
         "同一设备同时只允许一个监控/抢票任务（设备被占用时立即报错）。",
       inputSchema: {
         device_id: z.string(),
@@ -1057,6 +1071,7 @@ export function createMcpServer(): McpServer {
         max_consecutive_errors: z.number().int().min(1).max(50).default(5),
         open_page: z.boolean().default(true),
         deadline_unix_ms: z.number().nullable().default(null),
+        price_labels: z.array(z.string()).max(6).default([]),
       },
       outputSchema: DICT_OUTPUT,
     },
@@ -1068,6 +1083,7 @@ export function createMcpServer(): McpServer {
       max_consecutive_errors,
       open_page,
       deadline_unix_ms,
+      price_labels,
     }) => {
       // 设备占用互斥：openPage=true 的深链导航会干扰抢票流程的页面状态，
       // 与抢票工具在同一设备上互斥（进程内）；只读约束不变（零写入指令）
@@ -1078,6 +1094,7 @@ export function createMcpServer(): McpServer {
           maxConsecutiveErrors: max_consecutive_errors,
           openPage: open_page,
           deadlineUnixMs: deadline_unix_ms,
+          priceLabels: price_labels,
           onReport: (snapshot) => {
             const reasonText = snapshot.reason === null ? "" : `（${snapshot.reason}）`;
             const nextText =
@@ -1240,6 +1257,9 @@ export function createMcpServer(): McpServer {
             sessionIndex: pyIntCast(opts["session_index"] ?? 1),
             sessionLabel: opts["session_label"] === undefined ? "" : String(opts["session_label"]),
             priceLabel: opts["price_label"] === undefined ? "" : String(opts["price_label"]),
+            priceFallbacks: Array.isArray(opts["price_fallbacks"])
+              ? opts["price_fallbacks"].map((item) => String(item))
+              : [],
           },
         );
         return dictResult({

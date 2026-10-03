@@ -18,6 +18,7 @@ import {
   DamaiLoginExpiredError,
   UIElementNotFoundError,
 } from "../utils/errors";
+import { parseBeijingDateTime } from "../utils/beijingTime";
 import { logger } from "../utils/logging";
 import {
   isPriceHeading,
@@ -28,8 +29,10 @@ import {
   PRICE_CARD_TEXT,
   priceListReady,
   sheetHasChoice,
+  sessionCardsAwaitingPrices,
   sheetHeadingsReady,
   unlabeledSheetCards,
+  type PurchasePriceOption,
   type PurchaseSheetOptions,
 } from "./purchaseSheet";
 import { DamaiSelectors } from "./selectors";
@@ -97,6 +100,7 @@ export type GrabResult = {
     | "submitted"
     | "needs_action"
     | "needs_human_captcha"
+    | "cancelled"
     | "failed";
   /** 从流程开始到结束的耗时（毫秒）。 */
   elapsed_ms: number;
@@ -405,7 +409,8 @@ export async function damaiOpenConcert(
   {
     selectors = null,
     buyButtonTimeout = 8.0,
-  }: { selectors?: DamaiSelectors | null; buyButtonTimeout?: number } = {},
+    settleMs = 1500,
+  }: { selectors?: DamaiSelectors | null; buyButtonTimeout?: number; settleMs?: number } = {},
 ): Promise<OpenConcertResult> {
   const t0 = nowSec();
   const sel = selectors ?? new DamaiSelectors();
@@ -415,7 +420,7 @@ export async function damaiOpenConcert(
     "-d", `damai://item?id=${itemId}`,
     { deviceId, check: false, timeout: 10 },
   );
-  await waitMs(1500);
+  await waitMs(settleMs);
   if (!(await isDamaiForeground(deviceId))) {
     // 方案 2：web URL → 强制在 app 内打开
     await shell(
@@ -426,15 +431,16 @@ export async function damaiOpenConcert(
     await waitMs(2000);
   }
   // 等购买按钮出现（说明页面加载完成）
-  let loaded: boolean;
-  try {
-    await waitForElement(deviceId, `text=${sel.detailBuyButton}`, { timeout: buyButtonTimeout });
-    loaded = true;
-  } catch (exc) {
-    if (!(exc instanceof UIElementNotFoundError)) {
-      throw exc;
+  let loaded = false;
+  if (buyButtonTimeout > 0) {
+    try {
+      await waitForElement(deviceId, `text=${sel.detailBuyButton}`, { timeout: buyButtonTimeout });
+      loaded = true;
+    } catch (exc) {
+      if (!(exc instanceof UIElementNotFoundError)) {
+        throw exc;
+      }
     }
-    loaded = false;
   }
   return {
     item_id: itemId,
@@ -446,6 +452,8 @@ export async function damaiOpenConcert(
 // ---- 3. 选场次 / 选票档 --------------------------------------------------------
 
 const SHEET_POLL_MS = 200;
+/** 读取弹层时最多再 dump 几次。按 200ms 折算会连着 dump 二十次，无线调试上要一两分钟。 */
+const READ_SHEET_DUMPS = 4;
 
 /**
  * 在 timeout 秒内反复 dump，直到 ready 成立。
@@ -455,8 +463,9 @@ async function dumpUntilReady(
   deviceId: string,
   timeout: number,
   ready: (elements: readonly UIElement[]) => boolean,
+  maxAttempts?: number,
 ): Promise<UIElement[]> {
-  const attempts = Math.max(1, Math.ceil((timeout * 1000) / SHEET_POLL_MS));
+  const attempts = maxAttempts ?? Math.max(1, Math.ceil((timeout * 1000) / SHEET_POLL_MS));
   let last: UIElement[] = [];
   for (let i = 0; i < attempts; i += 1) {
     last = await dumpUi(deviceId, { compressed: false });
@@ -656,6 +665,175 @@ export async function damaiSelectPrice(
   return tapChoice(deviceId, target, "票档");
 }
 
+/** 购票张数上限（与 Web schema 一致）。 */
+export const MAX_TICKET_NUM = 6;
+/** 备选档位上限，不含主档。 */
+export const MAX_PRICE_FALLBACKS = 5;
+/** 列表里每一档都缺货时的错误前缀。抢票泵据此停重试。 */
+export const PRICE_FALLBACKS_SOLD_OUT = "备选档位均已缺货";
+
+/** 主档在前，备选按给定顺序跟在后面。空串和重复项丢掉。 */
+export function orderedPriceLabels(primary: string, fallbacks: readonly string[] = []): string[] {
+  const labels: string[] = [];
+  const first = primary.trim();
+  if (first !== "") {
+    labels.push(first);
+  }
+  for (const raw of fallbacks) {
+    const label = raw.trim();
+    if (label === "" || labels.includes(label)) {
+      continue;
+    }
+    labels.push(label);
+  }
+  return labels;
+}
+
+function visibleName(element: UIElement): string {
+  const text = element.text.trim();
+  return text !== "" ? text : element.contentDesc.trim();
+}
+
+function onSameRow(anchor: UIElement, element: UIElement): boolean {
+  const mid = (element.bounds[1] + element.bounds[3]) / 2;
+  return mid >= anchor.bounds[1] - 12 && mid <= anchor.bounds[3] + 12;
+}
+
+/** 在购买弹层里定位「数量」行、增加按钮和当前数字。 */
+export function locateTicketStepper(
+  elements: readonly UIElement[],
+  selectors: DamaiSelectors = new DamaiSelectors(),
+): { label: UIElement | null; increase: UIElement | null; count: number | null } {
+  const label =
+    elements.find((element) => element.visible && visibleName(element) === selectors.ticketCountLabel) ??
+    null;
+  if (label === null) {
+    return { label: null, increase: null, count: null };
+  }
+  const increase =
+    elements
+      .filter((element) => {
+        if (!element.visible || !onSameRow(label, element)) {
+          return false;
+        }
+        return (
+          selectors.ticketIncreaseTexts.includes(visibleName(element)) &&
+          element.center[0] > label.bounds[2]
+        );
+      })
+      .sort((a, b) => a.center[0] - b.center[0])[0] ?? null;
+  const countElement = elements
+    .filter((element) => {
+      if (!element.visible || !onSameRow(label, element) || !/^\d+$/.test(element.text.trim())) {
+        return false;
+      }
+      const x = element.center[0];
+      if (x <= label.bounds[2]) {
+        return false;
+      }
+      if (increase !== null && x >= increase.bounds[0]) {
+        return false;
+      }
+      return true;
+    })
+    .sort((a, b) => a.center[0] - b.center[0])[0];
+  return {
+    label,
+    increase,
+    count: countElement === undefined ? null : Number(countElement.text.trim()),
+  };
+}
+
+/**
+ * 把购买弹层的张数点到 `ticketNum`。1 张不点。
+ * 点完再读回数字，对不上就失败，不用坐标猜按钮。
+ */
+export async function damaiSelectTicketCount(
+  deviceId: string,
+  ticketNum: number,
+  {
+    selectors = null,
+  }: { selectors?: DamaiSelectors | null } = {},
+): Promise<number> {
+  if (ticketNum === 1) {
+    return 1;
+  }
+  const sel = selectors ?? new DamaiSelectors();
+  let elements = await dumpUi(deviceId);
+  let stepper = locateTicketStepper(elements, sel);
+  if (stepper.increase === null) {
+    throw new DamaiGrabFailedError("未找到购票数量增加按钮");
+  }
+  for (let step = 1; step < ticketNum; step += 1) {
+    await tap(deviceId, ...stepper.increase.center);
+    await waitMs(150);
+    elements = await dumpUi(deviceId);
+    stepper = locateTicketStepper(elements, sel);
+    if (stepper.increase === null) {
+      throw new DamaiGrabFailedError("未找到购票数量增加按钮");
+    }
+  }
+  if (stepper.count !== ticketNum) {
+    throw new DamaiGrabFailedError(
+      `购票张数读回为 ${stepper.count === null ? "未知" : String(stepper.count)}，期望 ${ticketNum}`,
+    );
+  }
+  return stepper.count;
+}
+
+/**
+ * 按主档、备选的顺序点第一张未缺货的票档。
+ * 没有文字档时退回 {@link damaiSelectPrice} 的序号。
+ */
+export async function damaiSelectPriceByPriority(
+  deviceId: string,
+  priceIndex: number,
+  {
+    selectors = null,
+    timeout = 4.0,
+    priceLabel = "",
+    priceFallbacks = [],
+  }: {
+    selectors?: DamaiSelectors | null;
+    timeout?: number;
+    priceLabel?: string;
+    priceFallbacks?: readonly string[];
+  } = {},
+): Promise<UIElement> {
+  const wanted = orderedPriceLabels(priceLabel, priceFallbacks);
+  if (wanted.length === 0) {
+    return damaiSelectPrice(deviceId, priceIndex, { selectors, timeout, priceLabel: "" });
+  }
+  const elements = await loadSheetElements(deviceId, timeout, (nodes) => listPriceCards(nodes).length > 0);
+  const cards = listPriceCards(elements);
+  if (cards.length === 0) {
+    const sawNewCard = elements.some(
+      (element) =>
+        element.visible &&
+        (isPriceHeading(element.text.trim()) || PRICE_CARD_TEXT.test(element.text.trim())),
+    );
+    const detail = sawNewCard ? "未找到价格卡片" : "未找到任何 ¥xxx 价格元素";
+    throw new DamaiGrabFailedError(`价格表未弹出: ${detail}`);
+  }
+  const parsed = parsePurchaseSheet(elements);
+  const byLabel = new Map<string, PurchasePriceOption>(parsed.prices.map((price) => [price.label, price]));
+  for (const label of wanted) {
+    const card = cards.find((element) => element.text.trim() === label);
+    const option = byLabel.get(label);
+    if (card === undefined || option?.soldOut === true) {
+      continue;
+    }
+    return tapChoice(deviceId, card, "票档");
+  }
+  const present = wanted.filter((label) => byLabel.has(label));
+  if (present.length > 0 && present.every((label) => byLabel.get(label)?.soldOut === true)) {
+    throw new DamaiGrabFailedError(`${PRICE_FALLBACKS_SOLD_OUT}：${wanted.join("、")}`);
+  }
+  throw new DamaiGrabFailedError(
+    `未找到可用票档（${wanted.join("、")}），当前有: ${joinedLabels(cards)}`,
+  );
+}
+
 /** 详情页上打开预约列表的按钮。不包含弹层里的「可预约」「已预约」。 */
 const RESERVE_ENTRY_TEXTS = ["去预约", "提前预约", "预约抢票"] as const;
 /**
@@ -682,8 +860,7 @@ async function tapExactText(deviceId: string, labels: readonly string[], timeout
   return false;
 }
 
-async function tapPurchaseBar(deviceId: string): Promise<boolean> {
-  const elements = await dumpUi(deviceId, { compressed: false });
+async function tapPurchaseBar(elements: readonly UIElement[], deviceId: string): Promise<boolean> {
   const bar = elements.find((element) => element.visible && element.resourceId === PURCHASE_BAR_ID);
   if (bar === undefined) {
     return false;
@@ -693,8 +870,12 @@ async function tapPurchaseBar(deviceId: string): Promise<boolean> {
   return true;
 }
 
-async function tapDetailBuyButton(deviceId: string, sel: DamaiSelectors): Promise<void> {
-  if (await tapPurchaseBar(deviceId)) {
+async function tapDetailBuyButton(
+  deviceId: string,
+  sel: DamaiSelectors,
+  elements: readonly UIElement[],
+): Promise<void> {
+  if (await tapPurchaseBar(elements, deviceId)) {
     return;
   }
   const opened = await tapExactText(
@@ -709,10 +890,37 @@ async function tapDetailBuyButton(deviceId: string, sel: DamaiSelectors): Promis
   if (reserved) {
     return;
   }
-  if (await tapPurchaseBar(deviceId)) {
+  const again = await dumpUi(deviceId, { compressed: false });
+  if (await tapPurchaseBar(again, deviceId)) {
     return;
   }
   throw new DamaiGrabFailedError("找不到立即购买或预约入口，无法读取场次与票档");
+}
+
+/**
+ * 票档区要等场次被选中才渲染。没有票档标题时先点第一场。
+ */
+async function revealPriceSection(
+  deviceId: string,
+  elements: UIElement[],
+  timeout: number,
+): Promise<UIElement[]> {
+  if (priceListReady(elements) || sheetHeadingsReady(elements)) {
+    return elements;
+  }
+  const target = sessionCardsAwaitingPrices(elements)[0];
+  if (target === undefined) {
+    return elements;
+  }
+  logger.info("票档区未出现，先点第一场");
+  await tap(deviceId, ...target.center);
+  await waitMs(400);
+  return dumpUntilReady(
+    deviceId,
+    timeout,
+    (nodes) => priceListReady(nodes) || sheetHeadingsReady(nodes),
+    READ_SHEET_DUMPS,
+  );
 }
 
 /**
@@ -728,16 +936,18 @@ export async function damaiReadPurchaseSheet(
   }: { selectors?: DamaiSelectors | null; timeout?: number } = {},
 ): Promise<PurchaseSheetOptions> {
   const sel = selectors ?? new DamaiSelectors();
-  await damaiOpenConcert(deviceId, itemId, { selectors: sel, buyButtonTimeout: 1.5 });
+  await damaiOpenConcert(deviceId, itemId, { selectors: sel, buyButtonTimeout: 0, settleMs: 500 });
   let elements = await dumpUi(deviceId, { compressed: false });
-  if (!priceListReady(elements) && !sheetHeadingsReady(elements)) {
-    await tapDetailBuyButton(deviceId, sel);
+  if (!priceListReady(elements) && !sheetHeadingsReady(elements) && sessionCardsAwaitingPrices(elements).length === 0) {
+    await tapDetailBuyButton(deviceId, sel, elements);
     elements = await dumpUntilReady(
       deviceId,
       timeout,
-      (nodes) => priceListReady(nodes) || sheetBodiesReady(nodes),
+      (nodes) => priceListReady(nodes) || sheetBodiesReady(nodes) || sessionCardsAwaitingPrices(nodes).length > 0,
+      READ_SHEET_DUMPS,
     );
   }
+  elements = await revealPriceSection(deviceId, elements, timeout);
   elements = await withCardText(deviceId, elements);
   if (!priceListReady(elements)) {
     throw new DamaiGrabFailedError(
@@ -920,6 +1130,16 @@ export interface DamaiGrabOptions {
    * 非空时按文字点选，点不中即失败，不退回 {@link damaiGrab} 的 priceIndex。
    */
   priceLabel?: string;
+  /**
+   * 主档缺货或对不上时按顺序尝试的票档全文。不含主档，最多 {@link MAX_PRICE_FALLBACKS} 个。
+   * 与 {@link DamaiGrabOptions.priceLabel} 都为空时仍按 priceIndex 点。
+   */
+  priceFallbacks?: readonly string[];
+  /**
+   * 外部停止。确认点击发出之前置位则返回 cancelled（订单未发出）；
+   * 点击已经调用之后置位则返回 needs_action。
+   */
+  stopEvent?: { readonly isSet: () => boolean } | null;
 }
 
 /**
@@ -932,7 +1152,7 @@ export interface DamaiGrabOptions {
  * 与 Python 原版的偏离：`maxRuntimeSec` 在 Python 版为「API 对等保留、未实现」；
  * 本版实现为**硬停止**（deadline 贯穿预热/开票等待与重试循环，超限抛
  * DamaiGrabFailedError）。库层默认 `0`（不启用）以保持直连调用方行为不变；
- * `ticketNum` 仍为 API 对等保留（张数逻辑未实现）。
+ * `ticketNum` 会在购买弹层里把张数点到该值；填了观演人时人数必须与张数一致。
  *
  * needs_action 语义：提交订单的点击发出后结果无法确认（如 adb 传输异常）时，
  * 返回 `status: "needs_action"` 并携带官方订单页 {@link DAMAI_ORDERS_URL}——
@@ -969,8 +1189,6 @@ export async function damaiGrab(
   viewerNames: string[] | null = null,
   ticketNum = 1,
   openTime = "",
-  // ticketNum 与 Python 原版一样在函数体内未被使用（张数逻辑未实现，
-  // 字段仍留在签名中为 API 对等保留）。
   {
     selectors = null,
     preheatSeconds = 30.0,
@@ -984,10 +1202,39 @@ export async function damaiGrab(
     sessionIndex = 1,
     sessionLabel = "",
     priceLabel = "",
+    priceFallbacks = [],
+    stopEvent = null,
   }: DamaiGrabOptions = {},
 ): Promise<GrabResult> {
   const sel = selectors ?? new DamaiSelectors();
   const viewers = viewerNames ?? [];
+  if (!Number.isInteger(ticketNum) || ticketNum < 1 || ticketNum > MAX_TICKET_NUM) {
+    return {
+      status: "failed",
+      elapsed_ms: 0,
+      screenshots: [],
+      error: `购票张数必须是 1 到 ${MAX_TICKET_NUM} 的整数`,
+      attempts: 0,
+    };
+  }
+  if (viewers.length > 0 && viewers.length !== ticketNum) {
+    return {
+      status: "failed",
+      elapsed_ms: 0,
+      screenshots: [],
+      error: `观演人数（${viewers.length}）必须等于购票张数（${ticketNum}）`,
+      attempts: 0,
+    };
+  }
+  if (priceFallbacks.length > MAX_PRICE_FALLBACKS) {
+    return {
+      status: "failed",
+      elapsed_ms: 0,
+      screenshots: [],
+      error: `备选档位最多 ${MAX_PRICE_FALLBACKS} 个`,
+      attempts: 0,
+    };
+  }
   const tStart = nowSec();
 
   // maxRuntimeSec 硬停止（与 Python 原版的偏离，见函数 TSDoc）：deadline 贯穿
@@ -1044,8 +1291,8 @@ export async function damaiGrab(
       );
     }
 
-    // 3. 计算目标时刻（open_time 按本地时区解析）
-    const targetTs = openTime ? parseIso(openTime).getTime() / 1000 : nowSec();
+    // 3. 计算目标时刻（open_time 按北京时间解析；parseIso 仍是本地时区）
+    const targetTs = openTime ? parseBeijingDateTime(openTime).getTime() / 1000 : nowSec();
 
     // 4. 预热 —— 由 damai_open_concert 完成（已在详情页）。
     //    preheat > 0 时等到 target_ts - preheat_seconds 再点购买按钮。
@@ -1129,7 +1376,24 @@ export async function damaiGrab(
      * 可重试失败抛 {@link GrabRetryableError}；终态直接返回 {@link GrabResult}；
      * 其余异常原样上抛（外层 catch 转 failed / 调用方接收）。
      */
+    const cancelledBeforeSubmit = (attemptNo: number): GrabResult => ({
+      status: "cancelled",
+      elapsed_ms: Math.trunc((nowSec() - tStart) * 1000),
+      item_id: itemId,
+      price_index: priceIndex,
+      ...selectionFields(),
+      viewer_names: viewers,
+      requires_human_confirmation: false,
+      payment_started: false,
+      screenshots: logPaths,
+      error: "用户在提交前取消，订单未发出",
+      attempts: attemptNo,
+    });
+
     const runGrabAttempt = async (attemptNo: number): Promise<GrabResult> => {
+      if (stopEvent !== null && stopEvent.isSet()) {
+        return cancelledBeforeSubmit(attemptNo);
+      }
       // 6. 点购买按钮（尝试所有已知文案变体）
       let buyBtn: UIElement | null = null;
       for (const label of [
@@ -1161,9 +1425,10 @@ export async function damaiGrab(
         pickedPriceLabel = "";
         const sessionEl = await damaiSelectSession(deviceId, sessionIndex, { sessionLabel });
         pickedSessionLabel = sessionEl?.text.trim() ?? "";
-        const priceEl = await damaiSelectPrice(deviceId, priceIndex, {
+        const priceEl = await damaiSelectPriceByPriority(deviceId, priceIndex, {
           selectors: sel,
           priceLabel,
+          priceFallbacks,
         });
         pickedPriceLabel = priceEl.text.trim();
       } catch (exc) {
@@ -1173,8 +1438,16 @@ export async function damaiGrab(
         ) {
           throw new GrabRetryableError("price_sheet", exc.message);
         }
+        if (
+          exc instanceof DamaiGrabFailedError &&
+          exc.message.startsWith(PRICE_FALLBACKS_SOLD_OUT)
+        ) {
+          throw new GrabCategorizedError("sold_out", exc.message);
+        }
         throw exc;
       }
+
+      await damaiSelectTicketCount(deviceId, ticketNum, { selectors: sel });
 
       // 8. 选观演人（「选观演人超时」属可重试失败）
       if (viewers.length > 0) {
@@ -1214,6 +1487,9 @@ export async function damaiGrab(
       // 只有调用方显式选择提交时才会走到这里。支付仍在本自动化流程之外，
       // 必须由用户完成。
       assertWithinDeadline(); // confirm 前的硬停止检查（此刻 tap 尚未发出，失败安全）
+      if (stopEvent !== null && stopEvent.isSet()) {
+        return cancelledBeforeSubmit(attemptNo);
+      }
 
       // 提交段三态语义（防重复下单）：
       // ① 定位失败（确认按钮从未出现）→ 订单请求必然未发出，原样上抛走既有
@@ -1223,36 +1499,49 @@ export async function damaiGrab(
       //    提示先查官方订单页，切勿直接重跑；
       // ③ 点击成功后的非致命失败（如调试截图）→ 订单已提交，仍返回 submitted，
       //    不降级为 failed（否则用户看到失败会重跑流程、重复下单）。
+      const needsAction = (reason: string): GrabResult => ({
+        status: "needs_action",
+        elapsed_ms: Math.trunc((nowSec() - tStart) * 1000),
+        item_id: itemId,
+        price_index: priceIndex,
+        ...selectionFields(),
+        viewer_names: viewers,
+        requires_human_confirmation: true,
+        payment_started: false,
+        order_url: DAMAI_ORDERS_URL,
+        screenshots: logPaths,
+        error: `${NEEDS_ACTION_MESSAGE}（原因: ${reason}）`,
+        attempts: attemptNo,
+      });
+
+      let confirmButton: UIElement;
       try {
-        await damaiConfirmOrder(deviceId, { selectors: sel });
+        confirmButton = await waitForElement(deviceId, `text=${sel.confirmButton}`, { timeout: 5.0 });
       } catch (exc) {
         if (exc instanceof UIElementNotFoundError) {
           // 阶段 ①：确认按钮定位失败 ≠ 已发单——上抛前先做 captcha 检测
-          //（此刻订单请求必然尚未发出，命中即安全转人工，不发单）
           const captchaWord = await detectCaptchaWord();
           if (captchaWord !== null) {
             return needsHumanCaptchaResult(attemptNo, captchaWord);
           }
-          // 保持既有语义原样上抛（外层 catch 不认 UIElementNotFoundError）
           throw exc;
         }
-        // 阶段 ②：定位成功后的点击传输异常——结果未知，按 needs_action 报告
-        //（needs_action 严禁被重试泵重跑：立即返回终态）
-        const elapsed = Math.trunc((nowSec() - tStart) * 1000);
-        return {
-          status: "needs_action",
-          elapsed_ms: elapsed,
-          item_id: itemId,
-          price_index: priceIndex,
-      ...selectionFields(),
-          viewer_names: viewers,
-          requires_human_confirmation: true,
-          payment_started: false,
-          order_url: DAMAI_ORDERS_URL,
-          screenshots: logPaths,
-          error: `${NEEDS_ACTION_MESSAGE}（原因: ${excToStr(exc)}）`,
-          attempts: attemptNo,
-        };
+        throw exc;
+      }
+      if (stopEvent !== null && stopEvent.isSet()) {
+        return cancelledBeforeSubmit(attemptNo);
+      }
+      try {
+        await tap(deviceId, ...confirmButton.center);
+      } catch (exc) {
+        if (exc instanceof UIElementNotFoundError) {
+          throw exc;
+        }
+        // 阶段 ②：点击是否送达未知
+        return needsAction(excToStr(exc));
+      }
+      if (stopEvent !== null && stopEvent.isSet()) {
+        return needsAction("用户在确认点击发出后取消");
       }
       // 阶段 ③：点击已成功送达——此后任何非致命失败都不得把已提交的订单
       // 降级为 failed；调试截图失败只损失该张截图。

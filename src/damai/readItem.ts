@@ -125,34 +125,47 @@ export async function readCurrentDamaiItem(deviceId: string): Promise<CurrentDam
   const detailPage = section !== null && isProjectDetail(section);
   if (current.foreground && current.itemId === null && detailPage && section !== null) {
     const pid = damaiPidFromActivityDump(section);
-    const fromLog = extractDetailItemIdFromLog(await readDetailLog(deviceId), pid);
-    const hash = extrasIdentity(await dumpActivityTop(deviceId));
+    // 日志和界面 dump 都要，并行。activity top 在这台机器上经常要 8 秒才超时，
+    // 日志已经有编号时不再等它。
+    const [log, fromUi] = await Promise.all([
+      readDetailLog(deviceId),
+      readForegroundUi(deviceId),
+    ]);
+    const fromLog = extractDetailItemIdFromLog(log, pid);
     if (fromLog !== null) {
-      if (hash !== null && pid !== null) {
-        await rememberDetailItem(deviceId, hash, pid, fromLog);
-      }
       current = { foreground: true, itemId: fromLog };
-    } else if (hash !== null) {
-      const cached = await recallDetailItem(deviceId, hash, pid);
-      if (cached !== null) {
-        current = { foreground: true, itemId: cached };
+    } else {
+      const hash = extrasIdentity(await dumpActivityTop(deviceId));
+      if (hash !== null) {
+        const cached = await recallDetailItem(deviceId, hash, pid);
+        if (cached !== null) {
+          current = { foreground: true, itemId: cached };
+        }
       }
     }
-  }
-  if (current.foreground && (current.itemId === null || detailPage)) {
-    const fromUi = await readForegroundUi(deviceId);
-    if (current.itemId === null) {
-      if (fromUi.itemId !== null) {
-        current = { foreground: true, itemId: fromUi.itemId };
-      } else if (fromUi.covered) {
-        current = { ...current, covered: true };
-      }
-    }
-    if (fromUi.detail !== null) {
-      current = { ...current, detail: fromUi.detail };
-    }
+    current = applyForegroundUi(current, fromUi);
+  } else if (current.foreground && (current.itemId === null || detailPage)) {
+    current = applyForegroundUi(current, await readForegroundUi(deviceId));
   }
   return current;
+}
+
+function applyForegroundUi(
+  current: CurrentDamaiItem,
+  fromUi: { itemId: string | null; covered: boolean; detail: ShowDetail | null },
+): CurrentDamaiItem {
+  let next = current;
+  if (next.itemId === null) {
+    if (fromUi.itemId !== null) {
+      next = { foreground: true, itemId: fromUi.itemId };
+    } else if (fromUi.covered) {
+      next = { ...next, covered: true };
+    }
+  }
+  if (fromUi.detail !== null) {
+    next = { ...next, detail: fromUi.detail };
+  }
+  return next;
 }
 
 /** 前台这一段是演出详情，而不是首页或频道。 */

@@ -138,7 +138,7 @@ const result = await damaiGrab(
   2,                      // priceIndex
   ["杨安琪"],              // viewerNames
   1,                      // ticketNum
-  "2026-07-09 17:21:00",  // openTime（按本地时区解析）
+  "2026-07-09 17:21:00",  // openTime（按北京时间解析）
   { preheatSeconds: 30 }, // 开票前预热秒数
 );
 console.log(result);

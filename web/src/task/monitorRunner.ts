@@ -16,6 +16,7 @@ import {
 } from "@core/damai/monitor";
 
 import type { TaskRunner } from "./manager";
+import { appendNotification, shouldNotifyMonitor, type TaskNotifyConfig } from "./taskNotify";
 
 /** 监控任务的参数（app/monitor 的 action schema 负责业务边界校验后透传）。 */
 export interface MonitorRunnerInput {
@@ -38,12 +39,14 @@ export interface MonitorRunnerInput {
   startAtUnixMs?: number | null;
   /** 墙钟截止（Unix 毫秒）；null/undefined = 不设截止（到达即停 "timeout"）。 */
   deadlineUnixMs?: number | null;
+  /** 有序票档全文。空则整页词表。 */
+  priceLabels?: readonly string[];
 }
 
-/** 本地时区 HH:mm（候场行用；保持固定宽度便于阅读）。 */
-function formatLocalHHmm(unixMs: number): string {
-  const at = new Date(unixMs);
-  return `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+/** 北京时间 HH:mm。 */
+function formatBeijingHHmm(unixMs: number): string {
+  const at = new Date(unixMs + 8 * 60 * 60 * 1000);
+  return `${String(at.getUTCHours()).padStart(2, "0")}:${String(at.getUTCMinutes()).padStart(2, "0")}`;
 }
 
 /**
@@ -60,7 +63,11 @@ function formatLocalHHmm(unixMs: number): string {
  */
 export function makeMonitorRunner(
   input: MonitorRunnerInput,
-  deps?: { monitor?: typeof monitorAvailability },
+  deps?: {
+    monitor?: typeof monitorAvailability;
+    notify?: TaskNotifyConfig | null;
+    send?: (config: TaskNotifyConfig, text: string) => Promise<{ status: string; error: string | null }>;
+  },
 ): TaskRunner {
   const monitor = deps?.monitor ?? monitorAvailability;
   return async ({ stopEvent, onProgress }) => {
@@ -77,7 +84,7 @@ export function makeMonitorRunner(
     if (startAtUnixMs !== null) {
       const delayMs = startAtUnixMs - Date.now();
       if (delayMs > 0) {
-        onProgress(`候场至 ${formatLocalHHmm(startAtUnixMs)}，到点开始采样`);
+        onProgress(`候场至 ${formatBeijingHHmm(startAtUnixMs)}（北京时间），到点开始采样`);
         const abort = new AbortController();
         try {
           const cancelledBeforeDue = await Promise.race([
@@ -101,6 +108,7 @@ export function makeMonitorRunner(
       maxConsecutiveErrors: input.maxConsecutiveErrors,
       openPage: input.openPage,
       deadlineUnixMs: input.deadlineUnixMs ?? null,
+      priceLabels: input.priceLabels ?? [],
       stopEvent,
       onReport: (snapshot) => {
         const reasonText = snapshot.reason === null ? "" : `（${snapshot.reason}）`;
@@ -116,7 +124,15 @@ export function makeMonitorRunner(
       `监控结束 stop_reason=${result.stopReason} attempts=${result.attempts} ` +
         `final_status=${result.finalStatus}`,
     );
-    return result.toDict();
+    const dict = result.toDict();
+    const notice = await appendNotification({
+      config: deps?.notify ?? null,
+      shouldSend: shouldNotifyMonitor(dict.found),
+      text: `监控发现余票 item=${input.itemId} ${result.lastReason ?? ""}`.trim(),
+      onProgress,
+      send: deps?.send,
+    });
+    return { ...dict, ...notice };
   };
 }
 

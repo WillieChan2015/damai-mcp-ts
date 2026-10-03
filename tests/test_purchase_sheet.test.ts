@@ -6,6 +6,7 @@ import {
   applyOcrLabels,
   labelFromOcrLines,
   parsePurchaseSheet,
+  sessionCardsAwaitingPrices,
   type OcrBox,
 } from "../src/damai/purchaseSheet";
 
@@ -45,6 +46,27 @@ describe("parseOcrOutput", () => {
   it("只收带文字框的行", () => {
     expect(parseOcrOutput("84,680,484,719\t2026-12-04 周五 19:00\nbad\n")).toEqual([
       { bounds: [84, 680, 484, 719], text: "2026-12-04 周五 19:00" },
+    ]);
+  });
+});
+
+describe("sessionCardsAwaitingPrices", () => {
+  it("未选场次时只返回场次卡片，不把底部 ¥0 当成一场", () => {
+    const elements = [
+      node("场次", [55, 519, 139, 575]),
+      node("场次时间均为演出当地时间", [155, 523, 539, 570]),
+      node("", [55, 609, 1025, 759], { clickable: true }),
+      node("预售", [495, 650, 579, 692]),
+      node("", [55, 759, 1025, 909], { clickable: true }),
+      node("预售", [487, 800, 571, 842]),
+      node("", [0, 2199, 1080, 2358], { clickable: true }),
+      node("¥", [55, 2246, 73, 2309]),
+      node("0", [73, 2247, 102, 2312]),
+    ];
+    const cards = sessionCardsAwaitingPrices(elements);
+    expect(cards.map((card) => card.bounds)).toEqual([
+      [55, 609, 1025, 759],
+      [55, 759, 1025, 909],
     ]);
   });
 });

@@ -34,6 +34,10 @@ export interface DamaiSelectorsInit {
   captchaIndicator?: string;
   /** 滑块验证码的滑块提示文本。 */
   captchaSwipeTo?: string;
+  /** 购买弹层里张数行的标题。 */
+  ticketCountLabel?: string;
+  /** 张数增加按钮的可见文案或 content-desc。 */
+  ticketIncreaseTexts?: string[];
   /** 「抢票人数太多」类瞬时拥塞弹窗文案（可重试）。 */
   crowdPopupWords?: string[];
   /** 拥塞弹窗上的关闭/确认按钮文案（tap 后重试；这是关闭弹窗的 tap，不是支付/下单 tap）。 */
@@ -77,6 +81,10 @@ export class DamaiSelectors {
   readonly captchaIndicator: string;
   /** 滑块验证码的滑块提示文本。 */
   readonly captchaSwipeTo: string;
+  /** 购买弹层里张数行的标题。 */
+  readonly ticketCountLabel: string;
+  /** 张数增加按钮的可见文案或 content-desc。 */
+  readonly ticketIncreaseTexts: readonly string[];
   /** 「抢票人数太多」类瞬时拥塞弹窗文案（可重试）。 */
   readonly crowdPopupWords: string[];
   /** 拥塞弹窗上的关闭/确认按钮文案（tap 后重试；这是关闭弹窗的 tap，不是支付/下单 tap）。 */
@@ -106,6 +114,8 @@ export class DamaiSelectors {
     this.loginButton = init.loginButton ?? "登录/注册";
     this.captchaIndicator = init.captchaIndicator ?? "请完成验证";
     this.captchaSwipeTo = init.captchaSwipeTo ?? "向右滑动滑块填充拼图";
+    this.ticketCountLabel = init.ticketCountLabel ?? "数量";
+    this.ticketIncreaseTexts = init.ticketIncreaseTexts ?? ["+", "增加"];
     this.crowdPopupWords = init.crowdPopupWords ?? [
       "人数太多",
       "抢票人数过多",

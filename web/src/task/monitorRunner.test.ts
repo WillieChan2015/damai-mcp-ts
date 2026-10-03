@@ -7,7 +7,7 @@ import {
   type MonitorReportSnapshot,
 } from "@core/damai/monitor";
 
-import { monitorTaskInputSchema } from "@/app/monitor/schema";
+import { datetimeLocalToUnixMs, monitorTaskInputSchema } from "@/app/monitor/schema";
 
 import { isMonitorResultDict, makeMonitorRunner, parseMonitorProgressLine } from "./monitorRunner";
 import type { MonitorRunnerInput } from "./monitorRunner";
@@ -148,7 +148,11 @@ describe("makeMonitorRunner（注入 fake monitor）", () => {
       { monitor: fake },
     )(makeCtx(lines));
 
-    expect(returned).toEqual(result.toDict());
+    expect(returned).toEqual({
+      ...result.toDict(),
+      notification_status: "unconfigured",
+      notification_error: null,
+    });
     expect(returned).toMatchObject({
       found: true,
       final_status: "available",
@@ -229,9 +233,10 @@ describe("makeMonitorRunner（注入 fake monitor）", () => {
     expect(monitorCalls).toBe(1);
     expect(done?.status).toBe("succeeded");
     expect(done?.progress.some((line) => line.startsWith("候场至"))).toBe(true);
-    expect(done?.progress[done.progress.length - 1]).toBe(
+    expect(done?.progress).toContain(
       "监控结束 stop_reason=available attempts=3 final_status=available",
     );
+    expect(done?.progress[done.progress.length - 1]).toBe("微信通知未发送：未配置");
   });
 });
 
@@ -300,6 +305,7 @@ describe("monitorTaskInputSchema（web 接线层边界）", () => {
     expect(monitorTaskInputSchema.safeParse({ ...base, startAt: "2026-10-03T19:00" }).success).toBe(
       true,
     );
+    expect(datetimeLocalToUnixMs("2026-10-03T19:00")).toBe(Date.UTC(2026, 9, 3, 11, 0, 0));
   });
 
   it("缺省字段取默认：intervalMs=30000、maxAttempts=720、openPage=true、无起止时刻", () => {

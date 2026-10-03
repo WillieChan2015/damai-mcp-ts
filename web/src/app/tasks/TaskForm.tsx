@@ -24,6 +24,56 @@ import { type DeviceIdentity } from "@/lib/deviceLabel";
 import { prepareViewerPresets, VIEWER_PRESET_NAME_MAX } from "@/lib/viewerPresetRules";
 import { readPurchaseSheet, saveViewerPresets, startGrabTask } from "./actions";
 
+function FallbackPrices({
+  prices,
+  primary,
+  selected,
+  onChange,
+}: {
+  prices: Array<{ label: string; soldOut: boolean }>;
+  primary: string;
+  selected: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const choices = prices.filter((price) => price.label !== primary);
+  if (choices.length === 0) {
+    return null;
+  }
+  const toggle = (label: string) => {
+    if (selected.includes(label)) {
+      onChange(selected.filter((item) => item !== label));
+      return;
+    }
+    if (selected.length >= 5) {
+      return;
+    }
+    onChange([...selected, label]);
+  };
+  return (
+    <div className="mt-2">
+      <p className="text-[11px] text-muted">备选档（按点击顺序，主档缺货后再试，最多 5 个）</p>
+      <div className="mt-1 flex flex-wrap gap-1.5">
+        {choices.map((price) => {
+          const on = selected.includes(price.label);
+          const order = selected.indexOf(price.label);
+          return (
+            <Button
+              key={price.label}
+              type="button"
+              variant={on ? "default" : "outline"}
+              size="xs"
+              onClick={() => toggle(price.label)}
+            >
+              {on ? `${order + 1}. ` : ""}
+              {price.soldOut ? `${price.label}（缺货登记）` : price.label}
+            </Button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function priceOptionLabel(price: { label: string; soldOut: boolean; picked: boolean }): string {
   if (price.soldOut) {
     return `${price.label}（缺货登记）`;
@@ -71,9 +121,11 @@ export function TaskForm({
       sessionLabel: "",
       priceIndex: 1,
       priceLabel: "",
+      priceFallbacks: [],
       ticketNum: 1,
       openTime: "",
       preheatSeconds: 30,
+      clockOffsetMs: null,
     },
   });
 
@@ -83,6 +135,10 @@ export function TaskForm({
       .split(/[,，]/)
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
+    if (viewerNames.length > 0 && viewerNames.length !== values.ticketNum) {
+      setError(`观演人数（${viewerNames.length}）必须等于购票张数（${values.ticketNum}）`);
+      return;
+    }
 
     const result = await startGrabTask({
       ...values,
@@ -167,6 +223,7 @@ export function TaskForm({
     setSheetError(null);
     form.setValue("sessionLabel", "");
     form.setValue("priceLabel", "");
+    form.setValue("priceFallbacks", []);
     // 只在设备或演出变化时丢掉已读列表。setValue 不该触发这次清理。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceId, itemId]);
@@ -180,6 +237,7 @@ export function TaskForm({
         setSheet(null);
         form.setValue("sessionLabel", "");
         form.setValue("priceLabel", "");
+        form.setValue("priceFallbacks", []);
         setSheetError(result.serverError);
         return;
       }
@@ -190,6 +248,7 @@ export function TaskForm({
       }
       form.setValue("sessionLabel", result.data.sessions[0]?.label ?? "");
       form.setValue("priceLabel", result.data.prices[0]?.label ?? "");
+      form.setValue("priceFallbacks", []);
       setSheet(result.data);
     } finally {
       setReadingSheet(false);
@@ -280,7 +339,17 @@ export function TaskForm({
                 control={form.control}
                 name="priceLabel"
                 render={({ field }) => (
-                  <Select value={field.value} onValueChange={field.onChange}>
+                  <Select
+                    value={field.value}
+                    onValueChange={(value) => {
+                      field.onChange(value);
+                      const current = form.getValues("priceFallbacks") ?? [];
+                      form.setValue(
+                        "priceFallbacks",
+                        current.filter((label) => label !== value),
+                      );
+                    }}
+                  >
                     <SelectTrigger className="mt-1 w-full">
                       <SelectValue placeholder="选择票档" />
                     </SelectTrigger>
@@ -293,6 +362,12 @@ export function TaskForm({
                     </SelectContent>
                   </Select>
                 )}
+              />
+              <FallbackPrices
+                prices={sheet.prices}
+                primary={form.watch("priceLabel") ?? ""}
+                selected={form.watch("priceFallbacks") ?? []}
+                onChange={(next) => form.setValue("priceFallbacks", next)}
               />
             </div>
           </>
@@ -394,7 +469,7 @@ export function TaskForm({
         </div>
 
         <div>
-          <label className={labelCls}>开票时间（本地时间，留空即时开抢）</label>
+          <label className={labelCls}>开票时间（北京时间，留空即时开抢）</label>
           <Controller
             control={form.control}
             name="openTime"
@@ -405,6 +480,31 @@ export function TaskForm({
                 format="open-time"
                 placeholder="留空则立即开抢"
                 className="mt-1"
+              />
+            )}
+          />
+        </div>
+
+        <div>
+          <label className={labelCls}>手动校时（毫秒，留空自动）</label>
+          <Controller
+            control={form.control}
+            name="clockOffsetMs"
+            render={({ field }) => (
+              <Input
+                type="number"
+                value={field.value ?? ""}
+                onChange={(event) => {
+                  const raw = event.target.value.trim();
+                  if (raw === "") {
+                    field.onChange(null);
+                    return;
+                  }
+                  const parsed = Number(raw);
+                  field.onChange(Number.isFinite(parsed) ? parsed : null);
+                }}
+                placeholder="服务器时间减本机时间"
+                className="mt-1 font-mono text-xs"
               />
             )}
           />

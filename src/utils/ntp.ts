@@ -461,6 +461,135 @@ export async function querySampled(
   });
 }
 
+/** 校时来源。manual 由调用方填入，不经过本函数。 */
+export type ClockSource = "ntp" | "taobao" | "bilibili" | "manual";
+
+/** 一次可用的时钟修正。 */
+export interface ClockFix {
+  offsetMs: number;
+  /** 手动修正时为 null。 */
+  uncertaintyMs: number | null;
+  /** HTTP 来源没有多次采样时为 null。 */
+  samples: number | null;
+  source: ClockSource;
+}
+
+const TAOBAO_TIME_URL = "https://api.m.taobao.com/rest/api3.do?api=mtop.common.getTimestamp";
+const BILIBILI_TIME_URL = "https://api.bilibili.com/x/report/click/now";
+
+/** 单臂 offset：server − sent − rtt/2。 */
+export function clockOffsetFromExchange(serverMs: number, sentMs: number, roundTripMs: number): number {
+  return serverMs - sentMs - roundTripMs / 2;
+}
+
+function validClockSample(serverMs: number, offsetMs: number): boolean {
+  return serverMs > 1_600_000_000_000 && Math.abs(offsetMs) <= NTP_MAX_OFFSET_ABS_MS;
+}
+
+async function readPublicClock(
+  fetchImpl: typeof fetch,
+  url: string,
+  source: "taobao" | "bilibili",
+  resolutionMs: number,
+  readServerMs: (body: unknown) => number | null,
+): Promise<ClockFix | null> {
+  const sentMs = Date.now();
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      headers: { "Cache-Control": "no-cache, no-store" },
+      signal: AbortSignal.timeout(4000),
+    });
+  } catch (err) {
+    logger.warning(
+      `公共时间 ${source} 请求失败: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+  const roundTripMs = Date.now() - sentMs;
+  if (!response.ok) {
+    return null;
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return null;
+  }
+  const serverMs = readServerMs(body);
+  if (serverMs === null) {
+    return null;
+  }
+  const offsetMs = clockOffsetFromExchange(serverMs, sentMs, roundTripMs);
+  if (!validClockSample(serverMs, offsetMs)) {
+    return null;
+  }
+  return {
+    offsetMs,
+    uncertaintyMs: roundTripMs / 2 + resolutionMs,
+    samples: null,
+    source,
+  };
+}
+
+function numberField(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) {
+    return Number(value);
+  }
+  return null;
+}
+
+/**
+ * 先做 NTP 多次采样；失败后再请求淘宝毫秒时间和 Bilibili 秒级时间。
+ * 请求不带账号 Cookie。全部失败时抛中文错误。
+ */
+export async function resolveClockOffset(options?: {
+  server?: string;
+  timeoutSec?: number;
+  fetchImpl?: typeof fetch;
+  ntp?: () => Promise<NtpSampleResult>;
+}): Promise<ClockFix> {
+  const ntp =
+    options?.ntp ??
+    (() => querySampled(options?.server ?? DEFAULT_NTP_SERVER, options?.timeoutSec));
+  try {
+    const sample = await ntp();
+    return {
+      offsetMs: sample.offsetMs,
+      uncertaintyMs: sample.uncertaintyMs,
+      samples: sample.samples,
+      source: "ntp",
+    };
+  } catch (err) {
+    logger.warning(`NTP 校时失败，改试公共时间接口: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const fetchImpl = options?.fetchImpl ?? globalThis.fetch;
+  const taobao = await readPublicClock(fetchImpl, TAOBAO_TIME_URL, "taobao", 1, (body) => {
+    if (body === null || typeof body !== "object") {
+      return null;
+    }
+    const data = (body as { data?: { t?: unknown } }).data;
+    return numberField(data?.t);
+  });
+  if (taobao !== null) {
+    return taobao;
+  }
+  const bilibili = await readPublicClock(fetchImpl, BILIBILI_TIME_URL, "bilibili", 1000, (body) => {
+    if (body === null || typeof body !== "object") {
+      return null;
+    }
+    const now = numberField((body as { data?: { now?: unknown } }).data?.now);
+    return now === null ? null : now * 1000;
+  });
+  if (bilibili !== null) {
+    return bilibili;
+  }
+  throw new Error("未能校正时钟：NTP 与公共时间接口都不可用");
+}
+
 // ------ 设备时钟辅助 -------------------------------------------------------
 
 /**

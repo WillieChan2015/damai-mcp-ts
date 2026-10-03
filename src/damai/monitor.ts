@@ -24,6 +24,7 @@ import { shell } from "../device/adb";
 import { dumpUi } from "../inspector/dump";
 import type { UIElement } from "../inspector/models";
 import { DAMAI_PACKAGE } from "./actions";
+import { parsePurchaseSheet } from "./purchaseSheet";
 import { logger } from "../utils/logging";
 
 // ---- 常量 ----------------------------------------------------------------------
@@ -121,6 +122,11 @@ export interface ClassifyAvailabilityOptions {
   positiveWords?: readonly string[];
   /** 倒计时节点 resource-id；传 null 关闭该检查。默认 {@link MONITOR_COUNTDOWN_RESOURCE_ID}。 */
   countdownResourceId?: string | null;
+  /**
+   * 有序票档全文。非空时只认列表里第一张可见且未缺货的卡片，
+   * 不再用整页「立即购买」或单张「缺货登记」判定。
+   */
+  priceLabels?: readonly string[];
 }
 
 /** 每次尝试完成后的上报快照。 */
@@ -163,6 +169,8 @@ export interface MonitorOptions {
   openPage?: boolean;
   /** 外部取消事件（结构等价 checklist 的 StopEvent）；置位即停 "cancelled"。 */
   stopEvent?: { readonly isSet: () => boolean } | null;
+  /** 传给 {@link classifyAvailability} 的票档全文。空则整页词表。 */
+  priceLabels?: readonly string[];
   /** 每次尝试完成后的快照回调；异常会被吞掉并记录 warning，绝不影响轮询本身。 */
   onReport?: MonitorReportCallback | null;
 }
@@ -336,6 +344,10 @@ export function classifyAvailability(
     options.countdownResourceId !== undefined
       ? options.countdownResourceId
       : MONITOR_COUNTDOWN_RESOURCE_ID;
+  const priceLabels = (options.priceLabels ?? []).map((label) => label.trim()).filter((label) => label !== "");
+  if (priceLabels.length > 0) {
+    return classifyListedPrices(elements, priceLabels, soldOutWords, notOnSaleWords, countdownRid);
+  }
 
   const soldOut = firstMentionedWord(elements, soldOutWords);
   if (soldOut !== null) {
@@ -351,6 +363,55 @@ export function classifyAvailability(
   const positive = firstMentionedWord(elements, positiveWords);
   if (positive !== null) {
     return { status: "available", reason: positive };
+  }
+  return { status: "unknown", reason: null };
+}
+
+/** 票档卡片和「缺货登记」角标不参与整页词表，避免一张缺货挡住其他档。 */
+function pageElementsOutsidePriceCards(elements: readonly UIElement[]): UIElement[] {
+  const cards = new Set(parsePurchaseSheet(elements).prices.map((price) => price.label));
+  return elements.filter((element) => {
+    const text = element.text.trim();
+    if (text === "缺货登记") {
+      return false;
+    }
+    return !cards.has(text);
+  });
+}
+
+function classifyListedPrices(
+  elements: readonly UIElement[],
+  priceLabels: readonly string[],
+  soldOutWords: readonly string[],
+  notOnSaleWords: readonly string[],
+  countdownRid: string | null,
+): MonitorJudge {
+  if (countdownRid !== null && countdownRid !== "" && countdownNodePresent(elements, countdownRid)) {
+    return { status: "not_on_sale", reason: "countdown_node" };
+  }
+  const page = pageElementsOutsidePriceCards(elements);
+  const notOnSale = firstMentionedWord(page, notOnSaleWords);
+  if (notOnSale !== null) {
+    return { status: "not_on_sale", reason: notOnSale };
+  }
+  const pageSoldOut = firstMentionedWord(page, soldOutWords);
+  if (pageSoldOut !== null) {
+    return { status: "sold_out", reason: pageSoldOut };
+  }
+  const prices = parsePurchaseSheet(elements).prices;
+  const seen: string[] = [];
+  for (const label of priceLabels) {
+    const card = prices.find((price) => price.label === label);
+    if (card === undefined) {
+      continue;
+    }
+    seen.push(label);
+    if (!card.soldOut) {
+      return { status: "available", reason: label };
+    }
+  }
+  if (seen.length > 0) {
+    return { status: "sold_out", reason: seen.join("、") };
   }
   return { status: "unknown", reason: null };
 }
@@ -407,6 +468,7 @@ export async function monitorAvailability(
     openPage = true,
     stopEvent = null,
     onReport = null,
+    priceLabels = [],
   } = options;
 
   if (!(intervalMs > 0)) {
@@ -537,7 +599,7 @@ export async function monitorAvailability(
       return finish("not_foreground", null);
     }
 
-    const judge = classifyAvailability(elements);
+    const judge = classifyAvailability(elements, { priceLabels });
     if (judge.status === "available") {
       await report("available", judge.reason, null);
       return finish("available", null, { finalStatus: "available", lastReason: judge.reason });

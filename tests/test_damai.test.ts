@@ -20,7 +20,9 @@ import {
   damaiGrab,
   damaiLoginCheck,
   damaiSelectPrice,
+  damaiSelectPriceByPriority,
   damaiSelectSession,
+  damaiSelectTicketCount,
   isInViewerNameList,
   parseIso,
   waitUntil,
@@ -434,6 +436,28 @@ describe("damai_grab 提交订单三态语义", () => {
     expect(result.order_url).toBe(DAMAI_ORDERS_URL);
     expect(result.requires_human_confirmation).toBe(true);
     expect(result.payment_started).toBe(false);
+  });
+
+  it("确认点击发出前取消 → cancelled，不把未下单记成失败", async () => {
+    const result = await runGrabToConfirm(async () => {}, {
+      grabOptions: { stopEvent: { isSet: () => true } },
+    });
+    expect(result.status).toBe("cancelled");
+    expect(result.order_url).toBeUndefined();
+    expect(tapMock).not.toHaveBeenCalled();
+  });
+
+  it("确认点击发出后取消 → needs_action", async () => {
+    let armed = false;
+    const result = await runGrabToConfirm(
+      async () => {
+        armed = true;
+      },
+      { grabOptions: { stopEvent: { isSet: () => armed } } },
+    );
+    expect(result.status).toBe("needs_action");
+    expect(result.order_url).toBe(DAMAI_ORDERS_URL);
+    expect(result.error).toContain("确认点击发出后取消");
   });
 
   it("确认订单阶段抛 UIElementNotFoundError → 仍按失败上抛（定位失败 ≠ 已发单）", async () => {
@@ -1047,6 +1071,54 @@ describe("购买弹层场次与票档", () => {
       "未找到票档「看台999元」",
     );
     expect(tapMock).not.toHaveBeenCalled();
+  });
+
+  it("主档缺货时点下一档，并把实际档返回", async () => {
+    dumpUiMock.mockResolvedValue(screenshotSheet());
+    waitMsMock.mockResolvedValue(undefined);
+    tapMock.mockResolvedValue(undefined);
+    const price = await damaiSelectPriceByPriority("device", 1, {
+      priceLabel: "看台488元",
+      priceFallbacks: ["看台688元"],
+    });
+    expect(price.text).toBe("看台688元");
+    expect(tapMock).toHaveBeenCalledWith("device", 68, 560);
+  });
+
+  it("列表里每一档都缺货 → 备选档位均已缺货", async () => {
+    dumpUiMock.mockResolvedValue(screenshotSheet());
+    await expect(
+      damaiSelectPriceByPriority("device", 1, {
+        priceLabel: "看台488元",
+        priceFallbacks: ["看台588元"],
+      }),
+    ).rejects.toThrow(/备选档位均已缺货/);
+    expect(tapMock).not.toHaveBeenCalled();
+  });
+
+  it("张数步进器读回不一致就失败", async () => {
+    const row = (count: string): UIElement[] => [
+      new UIElement({ tag: "node", text: "数量", bounds: [10, 100, 80, 140] }),
+      new UIElement({ tag: "node", text: count, bounds: [120, 100, 160, 140] }),
+      new UIElement({ tag: "node", text: "+", bounds: [180, 100, 220, 140] }),
+    ];
+    dumpUiMock.mockResolvedValue(row("1"));
+    tapMock.mockResolvedValue(undefined);
+    waitMsMock.mockResolvedValue(undefined);
+    await expect(damaiSelectTicketCount("device", 2)).rejects.toThrow("购票张数读回为 1，期望 2");
+    expect(tapMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("张数点到目标后读回通过", async () => {
+    const row = (count: string): UIElement[] => [
+      new UIElement({ tag: "node", text: "数量", bounds: [10, 100, 80, 140] }),
+      new UIElement({ tag: "node", text: count, bounds: [120, 100, 160, 140] }),
+      new UIElement({ tag: "node", text: "+", bounds: [180, 100, 220, 140] }),
+    ];
+    dumpUiMock.mockResolvedValueOnce(row("1")).mockResolvedValueOnce(row("2"));
+    tapMock.mockResolvedValue(undefined);
+    waitMsMock.mockResolvedValue(undefined);
+    await expect(damaiSelectTicketCount("device", 2)).resolves.toBe(2);
   });
 
   it("票档序号越界时带上实际卡片", async () => {

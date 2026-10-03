@@ -170,6 +170,31 @@ export function sheetHasChoice(elements: readonly UIElement[]): boolean {
   return listSessionCards(elements).length > 0 || listPriceCards(elements).length > 0;
 }
 
+/**
+ * 预热时核对冻结的文字选择。对得上返回 null。
+ * 场次或票档列表为空时不检查那一项。
+ */
+export function missingFrozenSelection(
+  sheet: PurchaseSheetOptions,
+  sessionLabel: string,
+  priceLabels: readonly string[],
+): string | null {
+  const session = sessionLabel.trim();
+  if (session !== "" && !sheet.sessions.some((item) => item.label === session)) {
+    const available = sheet.sessions.map((item) => item.label).join("、");
+    return available === ""
+      ? `预热校验未找到场次「${session}」`
+      : `预热校验未找到场次「${session}」，当前有: ${available}`;
+  }
+  if (priceLabels.length > 0 && !priceLabels.some((label) => sheet.prices.some((item) => item.label === label))) {
+    const available = sheet.prices.map((item) => item.label).join("、");
+    return available === ""
+      ? `预热校验未找到主档或备选：${priceLabels.join("、")}`
+      : `预热校验未找到主档或备选（${priceLabels.join("、")}），当前有: ${available}`;
+  }
+  return null;
+}
+
 /** 场次标题和票档标题都在。卡片正文可以还不在。 */
 export function sheetHeadingsReady(elements: readonly UIElement[]): boolean {
   return topmost(elements, isSessionHeading) !== undefined && topmost(elements, isPriceHeading) !== undefined;
@@ -254,6 +279,41 @@ export function unlabeledSheetCards(elements: readonly UIElement[]): UIElement[]
     const inSession = y > sessionHeading.bounds[3] && y < priceHeading.bounds[1];
     const inPrice = y > priceHeading.bounds[3] && y < footerCut;
     return inSession || inPrice;
+  });
+  return clickable
+    .filter((card) => !clickable.some((other) => other !== card && contains(other, card)))
+    .sort(byVisualOrder);
+}
+
+const FOOTER_MARKERS = ["¥", "确定", "已预约", "取消预约"] as const;
+
+/**
+ * 只出现了场次、票档区还没画出来时的场次卡片。
+ * 这种页不选场次就不会渲染票档。底栏（¥0 / 确定）不算场次。
+ */
+export function sessionCardsAwaitingPrices(elements: readonly UIElement[]): UIElement[] {
+  const sessionHeading = topmost(elements, isSessionHeading);
+  if (sessionHeading === undefined || topmost(elements, isPriceHeading) !== undefined) {
+    return [];
+  }
+  const clickable = elements.filter((element) => {
+    if (!element.visible || !element.clickable) {
+      return false;
+    }
+    if (element.height < 70 || element.height > 280 || element.width < 160) {
+      return false;
+    }
+    if (centerY(element) <= sessionHeading.bounds[3]) {
+      return false;
+    }
+    const holdsFooter = elements.some(
+      (marker) =>
+        marker !== element &&
+        marker.visible &&
+        (FOOTER_MARKERS as readonly string[]).includes(marker.text.trim()) &&
+        contains(element, marker),
+    );
+    return !holdsFooter;
   });
   return clickable
     .filter((card) => !clickable.some((other) => other !== card && contains(other, card)))

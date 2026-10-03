@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { actionClient } from "@/lib/safe-action";
 import { getTaskManager } from "@/task/manager";
 import { makeMonitorRunner } from "@/task/monitorRunner";
+import { loadTaskNotifyConfig } from "@/task/taskNotify";
 
 import { datetimeLocalToUnixMs, monitorTaskInputSchema } from "./schema";
 
@@ -18,20 +19,24 @@ export const startMonitorTask = actionClient
   .metadata({ operation: "启动监控" })
   .schema(monitorTaskInputSchema)
   .action(async ({ parsedInput }) => {
+    const notify = await loadTaskNotifyConfig();
     const snapshot = getTaskManager().start({
       kind: "monitor",
       deviceId: parsedInput.deviceId,
       label: `监控 ${parsedInput.itemId} @ ${parsedInput.deviceId}`,
-      runner: makeMonitorRunner({
-        deviceId: parsedInput.deviceId,
-        itemId: parsedInput.itemId,
-        intervalMs: parsedInput.intervalMs,
-        maxAttempts: parsedInput.maxAttempts,
-        openPage: parsedInput.openPage,
-        // datetime-local（本地时区）→ Unix 毫秒；缺省 = 立即 / 不设截止
-        startAtUnixMs: parsedInput.startAt ? datetimeLocalToUnixMs(parsedInput.startAt) : null,
-        deadlineUnixMs: parsedInput.endAt ? datetimeLocalToUnixMs(parsedInput.endAt) : null,
-      }),
+      runner: makeMonitorRunner(
+        {
+          deviceId: parsedInput.deviceId,
+          itemId: parsedInput.itemId,
+          intervalMs: parsedInput.intervalMs,
+          maxAttempts: parsedInput.maxAttempts,
+          openPage: parsedInput.openPage,
+          startAtUnixMs: parsedInput.startAt ? datetimeLocalToUnixMs(parsedInput.startAt) : null,
+          deadlineUnixMs: parsedInput.endAt ? datetimeLocalToUnixMs(parsedInput.endAt) : null,
+          priceLabels: parsedInput.priceLabels,
+        },
+        { notify },
+      ),
     });
     revalidatePath("/monitor");
     return { taskId: snapshot.id, status: snapshot.status };

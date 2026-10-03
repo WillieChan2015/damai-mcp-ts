@@ -6,7 +6,7 @@ import { z } from "zod";
  * 字段语义与 `src/server.ts` 的 `damai_grab` / `connect_device` 工具一一对齐：
  * - `sessionLabel` / `priceLabel` 为购买弹层上的卡片全文；非空时按文字点选。
  *   为空时才用 `sessionIndex` / `priceIndex`（均为 1-based）；
- * - `openTime` 为 'YYYY-MM-DD HH:MM:SS'（按本地时区解析，MIGRATION_NOTES §2.3），
+ * - `openTime` 为 'YYYY-MM-DD HH:MM:SS'（按北京时间解析，不读本机时区），
  *   空串表示「立即抢」；
  * - `confirmOrder` **不出现在 web 表单**：web runner 恒以 false 调用 core（D5，
  *   永不自动提交/支付）；此处的字段集仅覆盖 web 流程实际使用的参数。
@@ -40,16 +40,40 @@ export const grabTaskInputSchema = z.object({
   priceIndex: z.number().int().min(1).max(50).default(1),
   /** 票档卡片全文，例如「内场988元」。空串表示改用序号。 */
   priceLabel: z.string().max(80).default(""),
+  /** 主档之后按顺序尝试的票档全文。不含主档，最多 5 个。 */
+  priceFallbacks: z.array(z.string().min(1).max(80)).max(5).default([]),
   /** 观演人姓名列表（大麦实名制）；null = 不选择（App 自动带入）。 */
-  viewerNames: z.array(z.string().min(1)).max(20).nullable().default(null),
-  /** 购票张数（与 core 一致：签名保留，张数逻辑未实现）。 */
-  ticketNum: z.number().int().min(1).max(50).default(1),
-  /** 开票时间 'YYYY-MM-DD HH:MM:SS'（本地时区）；空串 = 立即抢。 */
+  viewerNames: z.array(z.string().min(1)).max(6).nullable().default(null),
+  /** 购票张数。大于 1 时在购买弹层里点增加并读回。 */
+  ticketNum: z.number().int().min(1).max(6).default(1),
+  /** 开票时间 'YYYY-MM-DD HH:MM:SS'（北京时间）；空串 = 立即抢。 */
   openTime: z
     .union([z.literal(""), z.string().regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)])
     .default(""),
   /** 开票前多少秒开始预热（详情页 + warm dump）。 */
   preheatSeconds: z.number().min(0).max(3600).default(30),
+  /**
+   * 手动时钟修正（毫秒）。null 表示自动校时。
+   * 填了数字（含 0）就跳过 NTP 和公共时间接口。
+   */
+  clockOffsetMs: z.number().finite().nullable().default(null),
+}).superRefine((value, ctx) => {
+  const names = (value.viewerNames ?? []).map((name) => name.trim()).filter((name) => name !== "");
+  if (names.length > 0 && names.length !== value.ticketNum) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `观演人数（${names.length}）必须等于购票张数（${value.ticketNum}）`,
+      path: ["viewerNames"],
+    });
+  }
+  const primary = value.priceLabel.trim();
+  if (primary !== "" && value.priceFallbacks.some((label) => label.trim() === primary)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "主档不能重复进备选",
+      path: ["priceFallbacks"],
+    });
+  }
 });
 
 export type GrabTaskInput = z.infer<typeof grabTaskInputSchema>;
