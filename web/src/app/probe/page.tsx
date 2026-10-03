@@ -1,6 +1,7 @@
 import { DeviceManager } from "@core/device/manager";
 
 import { ProbeWorkspace, type ProbeDeviceOption } from "./ProbeWorkspace";
+import { PageHeader } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
 
@@ -20,11 +21,7 @@ export default async function ProbePage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">选择器调试器</h1>
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          Dump 当前 UI 层级重建为可折叠树，或按文本试查选择器——大麦改版后定位新控件的第一个入口。
-          所有结果均标注 core 源码出处（dumpUi / findByText），便于把页面证据映射回选择器实现。
-        </p>
+        <PageHeader title="选择器调试器" lede="Dump 当前 UI 层级重建为可折叠树，或按文本试查选择器——大麦改版后定位新控件的第一个入口。 所有结果均标注 core 源码出处（dumpUi / findByText），便于把页面证据映射回选择器实现。" />
       </div>
 
       <ProbeWorkspace devices={devices} />

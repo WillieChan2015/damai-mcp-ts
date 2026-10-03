@@ -14,7 +14,7 @@ import type { AiSettingsStatus } from "@/lib/aiConfig";
  */
 
 const inputCls =
-  "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100";
+  "field";
 const labelCls = "block text-xs font-medium text-zinc-600 dark:text-zinc-400";
 
 /** 来源 → 中文标签。 */
@@ -59,24 +59,24 @@ export function SettingsForm({ status }: { status: AiSettingsStatus }) {
   };
 
   return (
-    <section className="rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+    <section className="panel p-6">
       <div className="flex flex-wrap items-center gap-2">
-        <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">Provider 设置</h2>
+        <h2 className="text-base font-semibold text-ink">Provider 设置</h2>
         <span
-          className={`rounded px-2 py-0.5 text-xs font-medium ${
+          className={`rounded border px-2 py-0.5 text-xs font-medium ${
             status.configured
-              ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-              : "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+              ? "border-ok/30 bg-ok/10 text-ok"
+              : "border-warn/30 bg-warn/10 text-warn"
           }`}
         >
           {status.configured ? "已配置" : "未配置"}
         </span>
-        <span className="text-xs text-zinc-400">
+        <span className="text-xs text-muted">
           来源：{SOURCE_LABEL[status.source]}
           {status.filePresent ? "；设置文件存在" : "；设置文件不存在"}
         </span>
       </div>
-      <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+      <p className="mt-1 text-sm text-muted">
         任意 OpenAI 兼容 API（Base URL 形如 https://host/v1）。保存写入
         web/data/ai-settings.json（权限 0600，优先级高于环境变量）；API Key
         只存服务端，页面仅显示掩码{status.maskedKey !== null ? `（当前：${status.maskedKey}）` : ""}。
@@ -143,7 +143,7 @@ export function SettingsForm({ status }: { status: AiSettingsStatus }) {
           <button
             type="submit"
             disabled={saving}
-            className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+            className="btn btn-primary px-4 py-2"
           >
             {saving ? "保存中…" : "保存设置"}
           </button>

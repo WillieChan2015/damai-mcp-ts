@@ -56,11 +56,11 @@ export function ScreenshotPreview({ devices }: { devices: PreviewDevice[] }) {
                 setSelected(d.deviceId);
                 setFailed(false);
               }}
-              className={
+              className={`rounded border px-3 py-1 font-mono text-xs transition-colors ${
                 selected === d.deviceId
-                  ? "rounded-lg border border-zinc-900 bg-zinc-900 px-3 py-1 font-mono text-xs text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
-                  : "rounded-lg border border-zinc-300 px-3 py-1 font-mono text-xs text-zinc-600 hover:border-zinc-500 dark:border-zinc-700 dark:text-zinc-400 dark:hover:border-zinc-500"
-              }
+                  ? "border-ink bg-ink text-paper font-semibold"
+                  : "border-line bg-surface text-muted hover:border-line-strong hover:text-ink"
+              }`}
             >
               {d.deviceId}
               {d.model ? ` · ${d.model}` : ""}
@@ -70,8 +70,8 @@ export function ScreenshotPreview({ devices }: { devices: PreviewDevice[] }) {
       )}
 
       {failed && (
-        <div className="rounded-xl border border-dashed border-red-300 p-6 text-center text-sm text-red-500 dark:border-red-800">
-          设备截图暂不可用（设备可能已离线），恢复后将自动重新显示。
+        <div className="rounded-lg border border-dashed border-danger/40 bg-danger/5 p-6 text-center text-xs text-danger">
+          设备截图暂不可用（设备可能已断开 ADB 连接），连接恢复后将自动重新显示。
         </div>
       )}
 
@@ -83,7 +83,7 @@ export function ScreenshotPreview({ devices }: { devices: PreviewDevice[] }) {
         className={
           failed
             ? "hidden"
-            : "mx-auto max-h-[70vh] rounded-xl border border-zinc-200 dark:border-zinc-800"
+            : "mx-auto max-h-[70vh] rounded-lg border border-line bg-surface object-contain shadow-xs"
         }
         onError={() => setFailed(true)}
         onLoad={() => setFailed(false)}

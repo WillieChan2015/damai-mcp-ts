@@ -5,7 +5,7 @@ import { useState } from "react";
 import { probeElementToString, type ProbeElement, type UiTreeNode } from "./tree";
 
 const BTN_CLS =
-  "rounded px-1 py-0.5 text-left font-mono text-xs hover:bg-zinc-100 dark:hover:bg-zinc-900";
+  "rounded px-1.5 py-0.5 text-left font-mono text-xs transition-colors hover:bg-surface-raised";
 
 /** class 全名取最后一段（android.widget.Button → Button）。 */
 function shortClassName(className: string): string {
@@ -27,7 +27,7 @@ export function CollapsibleJsonTree({
   onSelect: (element: ProbeElement) => void;
 }) {
   if (nodes.length === 0) {
-    return <p className="text-sm text-zinc-400 dark:text-zinc-500">（空树）</p>;
+    return <p className="text-sm text-muted">（空树）</p>;
   }
   return (
     <ul className="space-y-0.5 text-sm">
@@ -59,6 +59,11 @@ function TreeNode({
   const [open, setOpen] = useState(depth < 2);
   const el = node.element;
   const selected = el.index !== null && el.index === selectedIndex;
+
+  const labelText = `${el.index === null ? "" : `#${el.index} `}${shortClassName(el.class_name)}${
+    el.text ? ` “${el.text}”` : ""
+  }${el.resource_id ? ` ${el.resource_id}` : ""}${el.clickable ? " · clickable" : ""}`;
+
   return (
     <li>
       <details open={open}>
@@ -68,9 +73,9 @@ function TreeNode({
             e.preventDefault();
             setOpen((o) => !o);
           }}
-          className="cursor-pointer select-none list-none"
+          className="cursor-pointer select-none list-none py-0.5"
         >
-          <span aria-hidden className="mr-1 inline-block w-3 text-zinc-400">
+          <span aria-hidden className="mr-1 inline-block w-3 font-mono text-xs text-muted">
             {node.children.length > 0 ? (open ? "▾" : "▸") : "·"}
           </span>
           <button
@@ -81,19 +86,15 @@ function TreeNode({
             }}
             className={`${BTN_CLS} ${
               selected
-                ? "bg-zinc-200 font-medium text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50"
-                : "text-zinc-700 dark:text-zinc-300"
+                ? "bg-zinc-200 font-semibold text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50"
+                : "text-ink"
             }`}
           >
-            {el.index === null ? "" : `#${el.index} `}
-            {shortClassName(el.class_name)}
-            {el.text ? ` “${el.text}”` : ""}
-            {el.resource_id ? ` ${el.resource_id}` : ""}
-            {el.clickable ? " · clickable" : ""}
+            {labelText}
           </button>
         </summary>
         {node.children.length > 0 ? (
-          <ul className="ml-4 border-l border-zinc-200 pl-3 dark:border-zinc-800">
+          <ul className="ml-3 border-l border-line pl-2.5">
             {node.children.map((child) => (
               <TreeNode
                 key={child.element.index ?? probeElementToString(child.element)}

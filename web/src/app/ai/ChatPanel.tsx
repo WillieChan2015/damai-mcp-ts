@@ -23,31 +23,31 @@ const TRANSPORT = new DefaultChatTransport({ api: "/api/ai/chat" });
 const TOOL_STATE_VIEW: Record<ToolUIPart["state"], { label: string; cls: string }> = {
   "input-streaming": {
     label: "输入流式传输中",
-    cls: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
+    cls: "border-line bg-surface-raised text-muted",
   },
   "input-available": {
     label: "待执行",
-    cls: "bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
+    cls: "border-info/30 bg-info/10 text-info",
   },
   "approval-requested": {
     label: "等待批准",
-    cls: "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
+    cls: "border-warn/30 bg-warn/10 text-warn",
   },
   "approval-responded": {
     label: "已响应批准",
-    cls: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
+    cls: "border-line bg-surface-raised text-muted",
   },
   "output-available": {
     label: "已完成",
-    cls: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
+    cls: "border-ok/30 bg-ok/10 text-ok",
   },
   "output-error": {
     label: "执行出错",
-    cls: "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300",
+    cls: "border-danger/30 bg-danger/10 text-danger",
   },
   "output-denied": {
     label: "已拒绝",
-    cls: "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300",
+    cls: "border-danger/30 bg-danger/10 text-danger",
   },
 };
 
@@ -88,7 +88,7 @@ function isRenderablePart(part: UIMessage["parts"][number]): boolean {
 function JsonBlock({ label, value }: { label: string; value: unknown }) {
   return (
     <div>
-      <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">{label}</p>
+      <p className="text-xs font-medium text-muted">{label}</p>
       <pre className="mt-1 max-h-64 overflow-auto rounded-lg bg-zinc-50 p-2 font-mono text-xs text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
         {value === undefined || value === null ? "—" : JSON.stringify(value, null, 2)}
       </pre>
@@ -100,15 +100,15 @@ function JsonBlock({ label, value }: { label: string; value: unknown }) {
 function ToolCard({ view }: { view: ToolPartView }) {
   const badge = TOOL_STATE_VIEW[view.state];
   return (
-    <details className="rounded-lg border border-zinc-200 px-3 py-2 dark:border-zinc-800">
+    <details className="rounded-lg border border-line bg-surface px-3 py-2">
       <summary className="cursor-pointer list-none select-none">
-        <span aria-hidden className="mr-1 text-zinc-400">
+        <span aria-hidden className="mr-1 text-muted">
           ▸
         </span>
-        <span className="font-mono text-xs font-medium text-zinc-800 dark:text-zinc-200">
+        <span className="font-mono text-xs font-medium text-ink">
           {view.toolName}
         </span>
-        <span className={`ml-2 rounded px-2 py-0.5 text-xs font-medium ${badge.cls}`}>
+        <span className={`ml-2 rounded border px-2 py-0.5 text-xs font-medium ${badge.cls}`}>
           {badge.label}
         </span>
       </summary>
@@ -149,48 +149,45 @@ export function ChatPanel({ configured }: { configured: boolean }) {
   };
 
   return (
-    <section className="rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+    <section className="panel overflow-hidden">
       {!configured ? (
-        <p className="m-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-200">
-          尚未配置 AI 提供商——发送消息会收到配置引导。请先在
-          <a href="#ai-settings" className="mx-1 underline">
-            下方设置区
-          </a>
-          填入 Base URL / API Key / 模型名，或通过环境变量 DAMAI_AI_* 配置。
-        </p>
+        <div className="m-4 rounded-lg border border-warn/30 bg-warn/10 p-3 text-xs text-warn">
+          尚未配置 AI 提供商。可直接在下方「Provider 设置」填入 Base URL、API Key 与 Model，或通过环境变量 DAMAI_AI_* 注入。
+        </div>
       ) : null}
 
       <div
         ref={scrollRef}
-        className="max-h-[28rem] space-y-4 overflow-y-auto px-4 py-4"
+        className="max-h-[30rem] min-h-[16rem] space-y-4 overflow-y-auto p-5"
         aria-live="polite"
       >
         {chat.messages.length === 0 ? (
-          <p className="text-sm text-zinc-400 dark:text-zinc-500">
-            （暂无对话。试试「现在连接了哪些设备？」）
-          </p>
+          <div className="flex h-48 flex-col items-center justify-center text-center text-muted">
+            <p className="text-sm font-medium text-ink">AI 对话助手已就绪</p>
+            <p className="mt-1 text-xs">
+              支持自然语言查询已挂载的 Android 设备、检查大麦界面 UI 元素及当前监控任务。
+            </p>
+          </div>
         ) : null}
         {chat.messages.map((message) => {
           const toolViews = toolPartViews(message);
           return (
             <div key={message.id} className="space-y-2">
-              <p
-                className={`text-xs font-medium ${
-                  message.role === "user"
-                    ? "text-zinc-500 dark:text-zinc-400"
-                    : "text-emerald-600 dark:text-emerald-400"
-                }`}
-              >
+              <p className="text-xs font-semibold text-muted">
                 {message.role === "user" ? "你" : "AI 助手"}
               </p>
               {message.parts.filter(isRenderablePart).map((part, index) =>
                 part.type === "text" ? (
-                  <p
+                  <div
                     key={`${message.id}-text-${index}`}
-                    className="whitespace-pre-wrap text-sm text-zinc-800 dark:text-zinc-200"
+                    className={`rounded-lg px-3.5 py-2 text-xs leading-relaxed ${
+                      message.role === "user"
+                        ? "bg-surface-raised text-ink border border-line"
+                        : "bg-surface text-ink border border-line"
+                    }`}
                   >
-                    {part.text}
-                  </p>
+                    <p className="whitespace-pre-wrap">{part.text}</p>
+                  </div>
                 ) : null,
               )}
               {toolViews.map((view) => (
@@ -200,42 +197,42 @@ export function ChatPanel({ configured }: { configured: boolean }) {
           );
         })}
         {busy ? (
-          <p className="text-xs text-zinc-400 dark:text-zinc-500">
-            {chat.status === "submitted" ? "已提交，等待 AI 响应…" : "AI 正在回复…"}
-          </p>
+          <div className="flex items-center gap-2 text-xs text-muted">
+            <span className="live-dot" />
+            <span>{chat.status === "submitted" ? "已提交，等待 AI 响应…" : "AI 正在思考并组织回复…"}</span>
+          </div>
         ) : null}
         {chat.error !== undefined ? (
-          <p className="text-sm text-red-600 dark:text-red-400">
-            请求失败：{chat.error.message}（可重试；若提示未配置请先完成设置）
-          </p>
+          <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+            请求失败：{chat.error.message}（请先检查 Provider 配置或网络连通）
+          </div>
         ) : null}
       </div>
 
-      <div className="border-t border-zinc-200 px-4 py-3 dark:border-zinc-800">
+      <div className="border-t border-line bg-surface p-4">
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
-            // Enter 发送、Shift+Enter 换行（聊天输入惯例）
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               submit();
             }
           }}
           rows={2}
-          placeholder="输入消息，Enter 发送 / Shift+Enter 换行"
-          className="w-full resize-none rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+          placeholder="向助手提问（Enter 发送，Shift+Enter 换行）…"
+          className="field resize-none text-xs"
         />
-        <div className="mt-2 flex items-center justify-between">
-          <p className="text-xs text-zinc-400">
-            工具仅只读探查；对话记录仅保存在当前浏览器会话内。
+        <div className="mt-2.5 flex items-center justify-between">
+          <p className="text-[11px] text-muted">
+            探查工具仅执行只读动作（无下单/扣款接口）；会话不持久化到磁盘。
           </p>
           <div className="flex gap-2">
             {busy ? (
               <button
                 type="button"
                 onClick={() => chat.stop()}
-                className="rounded-lg border border-zinc-300 px-4 py-2 text-sm text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+                className="btn btn-secondary px-3 py-1.5 text-xs"
               >
                 停止
               </button>
@@ -244,7 +241,7 @@ export function ChatPanel({ configured }: { configured: boolean }) {
               type="button"
               onClick={submit}
               disabled={busy || input.trim() === ""}
-              className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+              className="btn btn-primary px-4 py-1.5 text-xs"
             >
               发送
             </button>

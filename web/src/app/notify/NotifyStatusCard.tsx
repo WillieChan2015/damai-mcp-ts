@@ -10,47 +10,48 @@ const SOURCE_LABEL: Record<NotifyFieldStatus["source"], string> = {
 /** 单字段行：名称 + 展示值（token/context_token 已是掩码）+ 来源标注。 */
 function FieldRow({ label, status }: { label: string; status: NotifyFieldStatus }) {
   return (
-    <li className="flex items-center justify-between gap-4 border-b border-zinc-100 py-2 last:border-b-0 dark:border-zinc-900">
-      <span className="font-mono text-sm font-medium text-zinc-700 dark:text-zinc-300">{label}</span>
+    <li className="flex items-center justify-between gap-4 border-b border-line py-2.5 last:border-b-0">
+      <span className="font-mono text-xs font-semibold text-ink">{label}</span>
       {status.configured ? (
-        <span className="text-right text-sm">
-          <code className="font-mono text-xs text-zinc-900 dark:text-zinc-100">{status.display}</code>
-          <span className="ml-2 text-xs text-zinc-500 dark:text-zinc-400">
-            已配置（来源：{SOURCE_LABEL[status.source]}）
+        <span className="text-right text-xs">
+          <code className="font-mono text-xs text-ink">{status.display}</code>
+          <span className="ml-2 text-muted">
+            （{SOURCE_LABEL[status.source]}）
           </span>
         </span>
       ) : (
-        <span className="text-sm text-red-600 dark:text-red-400">未配置</span>
+        <span className="text-xs text-danger font-medium">未配置</span>
       )}
     </li>
   );
 }
 
 /**
- * 配置完整性检查卡（服务端数据 props 展示，设计 §4.2/§4.4）：
- * 三要素逐字段「已配置（来源：…）或 未配置」，齐备时给出绿色「可以发送」结论。
+ * 配置完整性检查卡。
  */
 export function NotifyStatusCard({ snapshot }: { snapshot: NotifyStatusSnapshot }) {
   return (
-    <section className="rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-      <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">配置完整性检查</h2>
-      <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-        回落顺序：环境变量（DAMAI_CLAWBOT_*）→ 本地凭证文件（~/.config/damai-mcp-ts/notify.json）→
-        未配置。token 与 context_token 仅显示掩码，完整值不会回传到页面。
+    <section className="panel p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-semibold text-ink">配置完整性检查</h2>
+        <span className="font-mono text-xs text-muted">ClawBot 三要素</span>
+      </div>
+      <p className="text-xs text-muted">
+        回落顺序：环境变量（DAMAI_CLAWBOT_*）→ 本地凭证文件（~/.config/damai-mcp-ts/notify.json）→ 未配置。token 与 context_token 仅显示掩码，完整值不会回传到页面。
       </p>
-      <ul className="mt-4">
+      <ul className="rounded-lg border border-line bg-surface-raised px-4 py-1">
         <FieldRow label="origin" status={snapshot.origin} />
         <FieldRow label="token" status={snapshot.token} />
         <FieldRow label="context_token" status={snapshot.contextToken} />
       </ul>
       {snapshot.ready ? (
-        <p className="mt-4 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
-          三要素齐备，可以发送测试通知。
-        </p>
+        <div className="rounded border border-ok/30 bg-ok/10 px-3 py-2 text-xs text-ok font-medium">
+          三要素已齐备，微信通知通道处于就绪状态，可立即发送测试通知。
+        </div>
       ) : (
-        <p className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700 dark:bg-amber-950 dark:text-amber-300">
-          配置未齐备：可展开下方高级选项手填凭证完成本次测试发送（不保存），或按绑定指引配置。
-        </p>
+        <div className="rounded border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
+          配置未齐备：可展开下方高级选项手填凭证完成单次测试发送（不持久化），或参考下方指引完成环境配置。
+        </div>
       )}
     </section>
   );

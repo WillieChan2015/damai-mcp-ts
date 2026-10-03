@@ -1,26 +1,233 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/*
+ * 「开演前的指挥台」设计令牌
+ * 主题来自抢票场景本身：票根打孔线、戏剧海报的衬线标题、信号灯式的任务状态。
+ * 白天主题与夜间主题高对比专业调优，支持跟随系统或手动切换。
+ */
+:root,
+[data-theme="light"] {
+  --paper: #f5f6f9; /* 明亮冷灰纸基 */
+  --surface: #ffffff; /* 纯白工作台卡面 */
+  --surface-raised: #edf0f5; /* 次级分层背景与输入框底色 */
+  --ink: #11141a; /* 戏剧高对比铅墨 */
+  --muted: #555f6f; /* 清晰克制的辅助字色 */
+  --line: #dfe3eb; /* 细致裁切线 */
+  --line-strong: #bcc3d0; /* 轮廓线与操作边框 */
+  --accent: #c22f63; /* 经典大麦胭脂红 */
+  --ok: #0d7d49;
+  --warn: #b45309;
+  --danger: #be123c;
+  --info: #1d5ec9;
+  --radius-panel: 10px;
+  color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  :root:not([data-theme="light"]) {
+    --paper: #0b0d11;
+    --surface: #131720;
+    --surface-raised: #1a202c;
+    --ink: #f1f3f7;
+    --muted: #8893a4;
+    --line: #242b38;
+    --line-strong: #364152;
+    --accent: #e8457c;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --danger: #ef4444;
+    --info: #60a5fa;
+    color-scheme: dark;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+[data-theme="dark"] {
+  --paper: #0b0d11;
+  --surface: #131720;
+  --surface-raised: #1a202c;
+  --ink: #f1f3f7;
+  --muted: #8893a4;
+  --line: #242b38;
+  --line-strong: #364152;
+  --accent: #e8457c;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --danger: #ef4444;
+  --info: #60a5fa;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+  --font-sans: var(--font-geist-sans), "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace;
+  --font-display: var(--font-display-serif), "Songti SC", "SimSun", serif;
+}
+
+@layer base {
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* 表单控件全局一致：页面里不再各写一遍边框/圆角/聚焦 */
+  input,
+  select,
+  textarea {
+    width: 100%;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--ink);
+    padding: 8px 12px;
+    font-size: 13px;
+    font-family: inherit;
+    transition: border-color 0.15s ease;
+  }
+  input:focus,
+  select:focus,
+  textarea:focus {
+    border-color: var(--accent);
+    outline: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    outline-offset: 1px;
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: color-mix(in srgb, var(--muted) 70%, transparent);
+  }
+
+  table {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* 面板：线框 + 无阴影（与 SaaS 卡片组划清界限） */
+  .panel {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-panel);
+    background: var(--surface);
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition:
+      background 0.15s ease,
+      border-color 0.15s ease;
+  }
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .btn-primary {
+    background: var(--ink);
+    color: var(--paper);
+  }
+  .btn-primary:hover:enabled {
+    background: var(--accent);
+  }
+  .btn-secondary {
+    background: var(--surface);
+    border-color: var(--line-strong);
+    color: var(--ink);
+  }
+  .btn-secondary:hover:enabled {
+    background: var(--surface-raised);
+    border-color: var(--ink);
+  }
+  .btn-danger {
+    background: transparent;
+    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+    color: var(--danger);
+  }
+  .btn-danger:hover:enabled {
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+  }
+
+  /* 票根打孔分隔线：唯一的装饰母题，只用于纸面底色区域 */
+  .perforation {
+    position: relative;
+    height: 0;
+    border: none;
+    border-top: 2px dashed var(--line-strong);
+  }
+  .perforation::before,
+  .perforation::after {
+    content: "";
+    position: absolute;
+    top: -8px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--paper);
+    border: 1px solid var(--line);
+  }
+  .perforation::before {
+    left: -7px;
+  }
+  .perforation::after {
+    right: -7px;
+  }
+
+  /* 运行中信号灯：呼吸——只表达真实运行状态 */
+  .live-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--ok);
+    animation: breathe 1.6s ease-in-out infinite;
+  }
+
+  @keyframes breathe {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

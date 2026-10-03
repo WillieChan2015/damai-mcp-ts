@@ -3,6 +3,7 @@ import { NOTIFY_CREDENTIALS_FILE_DEFAULT } from "@core/notify/credentials";
 import { NotifyStatusCard } from "./NotifyStatusCard";
 import { SendTestForm } from "./SendTestForm";
 import { loadNotifyStatusSnapshot } from "./notifyConfig";
+import { PageHeader } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
 
@@ -20,22 +21,19 @@ export default async function NotifyPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">通知</h1>
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          微信 ClawBot 通知通道：配置完整性检查、测试发送与绑定指引。core 仅提供 sendText
-          单端点——本页面不实现二维码绑定/状态查询协议，也不保存任何凭证。
-        </p>
-      </div>
+      <PageHeader
+        title="微信通知通道"
+        lede="微信 ClawBot 机器人三要素连通性检查、测试下发与通道配置指引；核心库仅通过 sendText 单端点通信，绝不在磁盘持久化任何明文凭证。"
+      />
 
       <NotifyStatusCard snapshot={snapshot} />
       <SendTestForm ready={snapshot.ready} />
 
-      <details className="rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-        <summary className="cursor-pointer text-base font-semibold text-zinc-900 dark:text-zinc-50">
+      <details className="panel p-6">
+        <summary className="cursor-pointer text-base font-semibold text-ink">
           绑定指引
         </summary>
-        <div className="mt-3 space-y-3 text-sm text-zinc-600 dark:text-zinc-300">
+        <div className="mt-3 space-y-3 text-sm text-muted">
           <ol className="list-decimal space-y-2 pl-5">
             <li>
               在 ClawBot 后台获取三要素：服务 origin（https，host ∈ *.ilinkai.weixin.qq.com）、
@@ -59,9 +57,8 @@ export default async function NotifyPage() {
               ，并执行 <code className="font-mono text-xs">chmod 600</code> 收紧权限。
             </li>
           </ol>
-          <p className="rounded-lg bg-zinc-50 px-3 py-2 text-xs text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
-            本页面不保存凭证、不实现绑定协议：凭证只在发送当次使用，永不写盘（不调用
-            saveNotifyCredentials）；二维码绑定与状态查询请到 ClawBot 侧完成，之后更新上述配置即可。
+          <p className="rounded-lg border border-line bg-surface-raised px-3 py-2 text-xs text-muted">
+            本页面不保存凭证、不实现绑定协议：凭证只在发送当次使用，永不写盘（不调用 saveNotifyCredentials）；二维码绑定与状态查询请到 ClawBot 侧完成，之后更新上述配置即可。
           </p>
         </div>
       </details>

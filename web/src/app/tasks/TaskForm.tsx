@@ -8,19 +8,33 @@ import { grabTaskInputSchema } from "@core/schemas/grab";
 
 import { startGrabTask } from "./actions";
 
+export interface TaskFormDevice {
+  deviceId: string;
+  model?: string;
+}
+
+const PRESET_VIEWERS = ["杨安琪", "张三", "李四"];
+
 /**
- * 抢票任务表单（Phase 1）。
- *
- * 安全语义（D5）：不提供 confirmOrder 开关——runner 恒以默认 false 调 core，
- * 流程止步于提交前的 ready_for_human / needs_action，支付永远人工完成。
+ * 抢票任务启动台表单。
+ * 安全语义：不提供 confirmOrder 开关，流程止步于 ready_for_human，支付由人工手动完成。
  */
-export function TaskForm({ onStarted }: { onStarted: (taskId: string) => void }) {
+export function TaskForm({
+  devices = [],
+  onStarted,
+}: {
+  devices?: TaskFormDevice[];
+  onStarted: (taskId: string) => void;
+}) {
   const [viewerNamesRaw, setViewerNamesRaw] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  const defaultDeviceId = devices[0]?.deviceId ?? "";
+
   const form = useForm({
     resolver: zodResolver(grabTaskInputSchema),
     defaultValues: {
-      deviceId: "",
+      deviceId: defaultDeviceId,
       itemId: "",
       priceIndex: 1,
       ticketNum: 1,
@@ -31,7 +45,6 @@ export function TaskForm({ onStarted }: { onStarted: (taskId: string) => void })
 
   const onSubmit = form.handleSubmit(async (values) => {
     setError(null);
-    // 观演人：逗号/中文逗号分隔 → 数组；空 → null（App 自动带入）
     const viewerNames = viewerNamesRaw
       .split(/[,，]/)
       .map((s) => s.trim())
@@ -50,69 +63,146 @@ export function TaskForm({ onStarted }: { onStarted: (taskId: string) => void })
     }
   });
 
-  const inputCls =
-    "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100";
-  const labelCls = "block text-xs font-medium text-zinc-600 dark:text-zinc-400";
+  const addViewerPreset = (name: string) => {
+    const list = viewerNamesRaw
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (!list.includes(name)) {
+      list.push(name);
+      setViewerNamesRaw(list.join(", "));
+    }
+  };
+
+  const labelCls = "block text-xs font-medium text-muted";
 
   return (
-    <form onSubmit={onSubmit} className="grid gap-3 sm:grid-cols-2">
-      <div>
-        <label className={labelCls}>设备序列号</label>
-        <input {...form.register("deviceId")} placeholder="127.0.0.1:5555" className={`mt-1 ${inputCls}`} />
-      </div>
-      <div>
-        <label className={labelCls}>大麦 item id</label>
-        <input {...form.register("itemId")} placeholder="1063631004645" className={`mt-1 ${inputCls}`} />
-      </div>
-      <div>
-        <label className={labelCls}>票档序号（1-based）</label>
-        <input type="number" {...form.register("priceIndex", { valueAsNumber: true })} className={`mt-1 ${inputCls}`} />
-      </div>
-      <div>
-        <label className={labelCls}>张数</label>
-        <input type="number" {...form.register("ticketNum", { valueAsNumber: true })} className={`mt-1 ${inputCls}`} />
-      </div>
-      <div className="sm:col-span-2">
-        <label className={labelCls}>观演人（逗号分隔；留空 = App 自动带入）</label>
-        <input
-          value={viewerNamesRaw}
-          onChange={(e) => setViewerNamesRaw(e.target.value)}
-          placeholder="杨安琪, 张三"
-          className={`mt-1 ${inputCls}`}
-        />
-      </div>
-      <div>
-        <label className={labelCls}>开票时间（本地时区，留空 = 立即抢）</label>
-        <input {...form.register("openTime")} placeholder="2026-07-09 17:21:00" className={`mt-1 ${inputCls}`} />
-      </div>
-      <div>
-        <label className={labelCls}>预热秒数</label>
-        <input
-          type="number"
-          {...form.register("preheatSeconds", { valueAsNumber: true })}
-          className={`mt-1 ${inputCls}`}
-        />
+    <form onSubmit={onSubmit} className="space-y-4">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label className={labelCls}>目标设备</label>
+          {devices.length > 0 ? (
+            <select
+              {...form.register("deviceId")}
+              className="field mt-1"
+            >
+              {devices.map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.deviceId} {d.model ? `(${d.model})` : ""}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              {...form.register("deviceId")}
+              placeholder="127.0.0.1:5555"
+              className="field mt-1"
+            />
+          )}
+        </div>
+
+        <div>
+          <label className={labelCls}>大麦 Item ID</label>
+          <input
+            {...form.register("itemId")}
+            placeholder="例如 1063631004645"
+            className="field mt-1 font-mono text-xs"
+          />
+        </div>
+
+        <div>
+          <label className={labelCls}>票档序号 (1-based)</label>
+          <input
+            type="number"
+            min={1}
+            {...form.register("priceIndex", { valueAsNumber: true })}
+            className="field mt-1 font-mono text-xs"
+          />
+        </div>
+
+        <div>
+          <label className={labelCls}>购票张数</label>
+          <input
+            type="number"
+            min={1}
+            max={6}
+            {...form.register("ticketNum", { valueAsNumber: true })}
+            className="field mt-1 font-mono text-xs"
+          />
+        </div>
+
+        <div className="sm:col-span-2">
+          <div className="flex items-center justify-between">
+            <label className={labelCls}>观演人姓名（逗号分隔，留空由 App 自动带入）</label>
+            <div className="flex items-center gap-1.5 text-[11px] text-muted">
+              <span>快捷添加:</span>
+              {PRESET_VIEWERS.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  onClick={() => addViewerPreset(name)}
+                  className="rounded border border-line bg-surface-raised px-1.5 py-0.5 hover:border-line-strong hover:text-ink"
+                >
+                  +{name}
+                </button>
+              ))}
+            </div>
+          </div>
+          <input
+            value={viewerNamesRaw}
+            onChange={(e) => setViewerNamesRaw(e.target.value)}
+            placeholder="杨安琪, 张三"
+            className="field mt-1"
+          />
+        </div>
+
+        <div>
+          <label className={labelCls}>开票时间（本地时间，留空即时开抢）</label>
+          <input
+            {...form.register("openTime")}
+            placeholder="2026-10-04 12:00:00"
+            className="field mt-1 font-mono text-xs"
+          />
+        </div>
+
+        <div>
+          <label className={labelCls}>提前预热秒数</label>
+          <input
+            type="number"
+            min={5}
+            max={300}
+            {...form.register("preheatSeconds", { valueAsNumber: true })}
+            className="field mt-1 font-mono text-xs"
+          />
+        </div>
       </div>
 
-      {form.formState.errors.deviceId || form.formState.errors.itemId || form.formState.errors.openTime ? (
-        <p className="text-xs text-red-600 sm:col-span-2">
+      {(form.formState.errors.deviceId ||
+        form.formState.errors.itemId ||
+        form.formState.errors.openTime) && (
+        <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
           {form.formState.errors.deviceId?.message ??
             form.formState.errors.itemId?.message ??
             form.formState.errors.openTime?.message}
-        </p>
-      ) : null}
-      {error ? <p className="text-xs text-red-600 sm:col-span-2">{error}</p> : null}
+        </div>
+      )}
 
-      <div className="sm:col-span-2">
+      {error ? (
+        <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+          {error}
+        </div>
+      ) : null}
+
+      <div>
         <button
           type="submit"
           disabled={form.formState.isSubmitting}
-          className="w-full rounded-lg bg-zinc-900 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+          className="btn btn-primary w-full py-2.5 text-sm"
         >
-          {form.formState.isSubmitting ? "启动中…" : "启动抢票任务"}
+          {form.formState.isSubmitting ? "正在下发抢票任务…" : "启动抢票作战任务"}
         </button>
-        <p className="mt-2 text-xs text-zinc-400">
-          流程止步于提交前的人工确认（needs_action 时先核对官方订单页），支付永远手动完成。
+        <p className="mt-2 text-center text-[11px] text-muted">
+          严格安全约束：任务止步于「订单待人工确认」，绝不静默代扣款。
         </p>
       </div>
     </form>

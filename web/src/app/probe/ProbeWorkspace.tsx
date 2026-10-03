@@ -12,7 +12,7 @@ export interface ProbeDeviceOption {
 }
 
 const SELECT_CLS =
-  "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100";
+  "field";
 
 /**
  * 调试器工作区：共享设备下拉 + 两个工具卡（Dump 树查看 / find_text 试查）。
@@ -23,26 +23,30 @@ export function ProbeWorkspace({ devices }: { devices: ProbeDeviceOption[] }) {
 
   if (devices.length === 0) {
     return (
-      <div className="rounded-xl border border-dashed border-zinc-300 p-8 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
-        未发现设备，无法进行选择器调试。请先在「设备」页连接设备（<code>adb devices</code> 有输出后再回到本页）。
+      <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-line p-10 text-center">
+        <p className="text-sm font-medium text-ink">未检测到已连接的 Android 设备</p>
+        <p className="mt-1 text-xs text-muted">
+          无法进行选择器调试。请先在「设备机架」页面插拔 USB 真机或输入模拟器无线地址连接。
+        </p>
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      <div className="space-y-1">
-        <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400">
-          设备（Dump 与 find_text 共用）
-        </label>
+      <div className="flex flex-col gap-2 rounded-lg border border-line bg-surface p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <label className="block text-xs font-medium text-ink">当前调试目标设备</label>
+          <p className="text-[11px] text-muted">切换设备后工作区与 Dump 树将自动刷新</p>
+        </div>
         <select
           value={deviceId}
           onChange={(e) => setDeviceId(e.target.value)}
-          className={SELECT_CLS}
+          className="field max-w-xs text-xs font-mono"
         >
           {devices.map((d) => (
             <option key={d.deviceId} value={d.deviceId}>
-              {d.deviceId}（{d.model}）
+              {d.deviceId} {d.model ? `(${d.model})` : ""}
             </option>
           ))}
         </select>

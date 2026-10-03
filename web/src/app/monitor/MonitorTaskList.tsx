@@ -95,7 +95,7 @@ function MonitorTaskRow({ task }: { task: TaskSnapshot }) {
       : (task.error ?? "—");
 
   return (
-    <tr className="border-b border-zinc-100 dark:border-zinc-900">
+    <tr className="border-b border-line hover:bg-surface-raised transition-colors">
       <td className="py-2 pr-4 font-mono text-xs">{task.id.slice(0, 8)}</td>
       <td className="py-2 pr-4">{task.label}</td>
       <td className="py-2 pr-4 font-mono text-xs">{task.deviceId}</td>
@@ -105,7 +105,7 @@ function MonitorTaskRow({ task }: { task: TaskSnapshot }) {
       <td className="py-2 pr-4">
         <AvailabilityBadge status={availability} />
       </td>
-      <td className="py-2 pr-4 text-xs text-zinc-500 dark:text-zinc-400">{evidence}</td>
+      <td className="py-2 pr-4 text-xs text-muted">{evidence}</td>
       <td className="py-2 pr-4 text-xs">
         {result?.found ? (
           <a
@@ -125,7 +125,7 @@ function MonitorTaskRow({ task }: { task: TaskSnapshot }) {
               type="button"
               onClick={onCancel}
               disabled={isPending}
-              className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-40 dark:border-red-900 dark:hover:bg-red-950"
+              className="btn btn-danger px-3 py-1.5 text-xs"
             >
               取消
             </button>
@@ -161,13 +161,13 @@ export function MonitorTaskList({ initialTasks }: { initialTasks: TaskSnapshot[]
         <span className="text-xs text-zinc-400">1.5s 自动刷新</span>
       </div>
       {tasks.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-zinc-300 p-8 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
-          还没有监控任务——用上方表单启动一个。
+        <div className="rounded-lg border border-dashed border-line p-8 text-center text-sm text-muted">
+          还没有监控任务——用上方表单启动一个余票监控。
         </div>
       ) : (
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-zinc-200 text-left text-zinc-500 dark:border-zinc-800">
+            <tr className="border-b border-line text-left text-muted">
               <th className="py-2 pr-4 font-medium">任务</th>
               <th className="py-2 pr-4 font-medium">描述</th>
               <th className="py-2 pr-4 font-medium">设备</th>

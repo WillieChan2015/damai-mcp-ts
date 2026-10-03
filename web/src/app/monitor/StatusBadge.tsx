@@ -12,31 +12,31 @@ import type { TaskStatus } from "@/task/manager";
  */
 
 const AVAILABILITY_CLS: Record<Availability, string> = {
-  available: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
-  not_on_sale: "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
-  sold_out: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
-  unknown: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
+  available: "border-ok/30 bg-ok/10 text-ok font-semibold",
+  not_on_sale: "border-info/30 bg-info/10 text-info",
+  sold_out: "border-danger/30 bg-danger/10 text-danger",
+  unknown: "border-line bg-surface-raised text-muted",
 };
 
 const AVAILABILITY_TEXT: Record<Availability, string> = {
-  available: "有票",
-  not_on_sale: "未开售",
-  sold_out: "已售罄",
-  unknown: "未知",
+  available: "有票 (available)",
+  not_on_sale: "未开售 (not_on_sale)",
+  sold_out: "已售罄 (sold_out)",
+  unknown: "未知 (unknown)",
 };
 
 /** 四态余票徽标；status=null 表示尚未产生任何采样（运行中但 SSE 还没报数）。 */
 export function AvailabilityBadge({ status }: { status: Availability | null }) {
   if (status === null) {
     return (
-      <span className="inline-block rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500">
+      <span className="inline-block rounded border border-line bg-surface-raised px-2 py-0.5 text-xs text-muted">
         待采样
       </span>
     );
   }
   return (
     <span
-      className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${AVAILABILITY_CLS[status]}`}
+      className={`inline-block rounded border px-2 py-0.5 text-xs ${AVAILABILITY_CLS[status]}`}
     >
       {AVAILABILITY_TEXT[status]}
     </span>
@@ -44,13 +44,12 @@ export function AvailabilityBadge({ status }: { status: Availability | null }) {
 }
 
 const TASK_STATUS_CLS: Record<TaskStatus, string> = {
-  running: "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
-  cancelling: "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
-  cancelled: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
-  succeeded: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
-  failed: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
-  // interrupted（persistence 项 additive 状态）：上个进程遗留、启动恢复时改标的只读历史
-  interrupted: "bg-slate-100 text-slate-600 dark:bg-slate-900 dark:text-slate-300",
+  running: "border-info/30 bg-info/10 text-info font-medium",
+  cancelling: "border-warn/30 bg-warn/10 text-warn font-medium",
+  cancelled: "border-line bg-surface-raised text-muted",
+  succeeded: "border-ok/30 bg-ok/10 text-ok font-medium",
+  failed: "border-danger/30 bg-danger/10 text-danger font-medium",
+  interrupted: "border-line bg-surface-raised text-muted",
 };
 
 const TASK_STATUS_TEXT: Record<TaskStatus, string> = {
@@ -71,16 +70,16 @@ export function TaskStatusBadge({
   unresponsive?: boolean;
 }) {
   const cls = unresponsive
-    ? "border border-dashed border-purple-500 bg-purple-50 text-purple-700 dark:bg-purple-950 dark:text-purple-300"
+    ? "border border-dashed border-warn bg-warn/10 text-warn"
     : TASK_STATUS_CLS[status];
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}
+      className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-xs font-medium ${cls}`}
     >
       {status === "running" ? (
         <span
           aria-hidden
-          className="h-2 w-2 animate-spin rounded-full border border-current border-t-transparent"
+          className="live-dot"
         />
       ) : null}
       {TASK_STATUS_TEXT[status]}

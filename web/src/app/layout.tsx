@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Noto_Serif_SC } from "next/font/google";
 import "./globals.css";
 
+import { NavLinks } from "./NavLinks";
 import { Providers } from "./providers";
+import { ThemeToggle } from "./ThemeToggle";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -15,71 +17,59 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+// 衬线中文展示字体：戏剧海报气质的页题与品牌（按需子集加载，不 preload）
+const displaySerif = Noto_Serif_SC({
+  weight: ["600", "900"],
+  subsets: [],
+  preload: false,
+  variable: "--font-display-serif",
+});
+
 export const metadata: Metadata = {
-  title: "Damai Web Console",
-  description: "damai-mcp-ts 可视化控制台",
+  title: "抢票指挥台 · damai-mcp-ts",
+  description: "大麦抢票可视化指挥台：任务、监控、日志与调试",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="zh-CN"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      suppressHydrationWarning
+      className={`${geistSans.variable} ${geistMono.variable} ${displaySerif.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-zinc-50 dark:bg-black">
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem("damai_theme");if(t==="light"||t==="dark"){document.documentElement.setAttribute("data-theme",t);}}catch(e){}})();`,
+          }}
+        />
+      </head>
+      <body className="flex min-h-full flex-col bg-paper text-ink transition-colors duration-150">
         <Providers>
-          <header className="border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
-            {/* flex-wrap：7 个导航项在窄屏下换行而非溢出（桌面端视觉不变） */}
-            <nav className="mx-auto flex w-full max-w-4xl flex-wrap items-center gap-x-4 gap-y-2 px-6 py-3 sm:gap-x-6">
-              <Link href="/" className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-                🎫 Damai Console
+          <header className="sticky top-0 z-20 border-b border-line bg-surface/90 backdrop-blur">
+            <nav
+              className="mx-auto flex w-full max-w-7xl items-center gap-4 sm:gap-6 px-4 py-2.5 sm:px-6"
+              aria-label="品牌与导航"
+            >
+              <Link href="/" className="flex items-baseline gap-2 whitespace-nowrap">
+                <span className="font-display text-lg font-black tracking-tight text-ink">
+                  抢票指挥台
+                </span>
+                <span className="hidden font-mono text-[10px] text-muted sm:inline">
+                  damai-mcp-ts
+                </span>
               </Link>
-              <Link
-                href="/devices"
-                className="text-sm text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-              >
-                设备
-              </Link>
-              <Link
-                href="/tasks"
-                className="text-sm text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-              >
-                抢票任务
-              </Link>
-              <Link
-                href="/monitor"
-                className="text-sm text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-              >
-                监控
-              </Link>
-              <Link
-                href="/notify"
-                className="text-sm text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-              >
-                通知
-              </Link>
-              <Link
-                href="/logs"
-                className="text-sm text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-              >
-                日志
-              </Link>
-              <Link
-                href="/probe"
-                className="text-sm text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-              >
-                调试器
-              </Link>
-              <Link
-                href="/ai"
-                className="text-sm text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-              >
-                AI 助手
-              </Link>
-              <span className="ml-auto text-xs text-zinc-400">永不自动支付 · 仅供学习研究</span>
+              <NavLinks />
+              <ThemeToggle />
             </nav>
           </header>
-          <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-8">{children}</main>
+          <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 sm:py-8">{children}</main>
+          <footer className="border-t border-line bg-surface/50">
+            <div className="mx-auto flex w-full max-w-7xl flex-col items-start justify-between gap-2 px-4 py-3 text-xs text-muted sm:flex-row sm:items-center sm:px-6">
+              <span>流程止步于人工确认，支付永远手动完成 · 仅供学习研究</span>
+              <span className="font-mono text-[11px]">v0.2.3 · 宽屏指挥舱体系</span>
+            </div>
+          </footer>
         </Providers>
       </body>
     </html>

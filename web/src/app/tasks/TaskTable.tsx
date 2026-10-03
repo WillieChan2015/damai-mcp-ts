@@ -74,7 +74,7 @@ export function TaskTable({
     <table className="w-full text-sm">
       <thead>
         {table.getHeaderGroups().map((hg) => (
-          <tr key={hg.id} className="border-b border-zinc-200 text-left text-zinc-500 dark:border-zinc-800">
+          <tr key={hg.id} className="border-b border-line text-left text-muted">
             {hg.headers.map((header) => (
               <th key={header.id} className="py-2 pr-4 font-medium">
                 {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
@@ -88,8 +88,8 @@ export function TaskTable({
           <tr
             key={row.id}
             onClick={() => onSelect(row.original.id)}
-            className={`cursor-pointer border-b border-zinc-100 hover:bg-zinc-50 dark:border-zinc-900 dark:hover:bg-zinc-900 ${
-              row.original.id === selectedId ? "bg-zinc-50 dark:bg-zinc-900" : ""
+            className={`cursor-pointer border-b border-line transition-colors hover:bg-surface-raised ${
+              row.original.id === selectedId ? "bg-surface-raised font-medium" : ""
             }`}
           >
             {row.getVisibleCells().map((cell) => (

@@ -6,6 +6,7 @@ import { DeviceManager } from "@core/device/manager";
 import { resolveShotsDir, shotsDirCandidates } from "@/lib/paths";
 
 import { ScreenshotPreview } from "./ScreenshotPreview";
+import { PageHeader } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
 
@@ -69,65 +70,76 @@ export default async function ScreenshotsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">截图墙</h1>
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          上方为设备实时画面（2s 轮询）；下方为抢票流程自动保存的失败现场截图（最新在前，最多 200 张）。
-        </p>
+        <PageHeader title="截图墙" lede="上方为设备实时画面（2s 轮询）；下方为抢票流程自动保存的失败现场截图（最新在前，最多 200 张）。" />
       </div>
 
-      <ScreenshotPreview devices={devices} />
+      <div className="panel p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-ink">在线设备实时视窗 (2s 轮询)</h2>
+          <span className="font-mono text-xs text-muted">/api/devices/[id]/screenshot</span>
+        </div>
+        <ScreenshotPreview devices={devices} />
+      </div>
 
-      {resolution === null ? (
-        <div className="space-y-3 rounded-xl border border-dashed border-zinc-300 p-8 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
-          <p>
-            未找到 damai_shots 截图目录。抢票失败时的现场截图（
-            <code>open_fail_*</code> / <code>no_buy_btn_*</code> /{" "}
-            <code>ready_for_human_*</code> / <code>grab_fail_*</code> 等）出现后，此处会自动显示。          </p>
-          <p className="text-xs">
-            也可用环境变量 <code>DAMAI_WEB_SHOTS_DIR</code> 显式指定目录。已检查的候选：
-          </p>
-          <ul className="space-y-1 text-xs">
-            {shotsDirCandidates().map((c) => (
-              <li key={c.source} className="font-mono">
-                {c.dir} — {c.exists ? "存在" : "不存在"}
-              </li>
+      <section className="space-y-3">
+        <div className="flex items-center justify-between px-1">
+          <h2 className="text-sm font-semibold text-ink">抢票事故现场证据库</h2>
+          <span className="text-xs text-muted">失败现场快照自动归档（倒序排列）</span>
+        </div>
+
+        {resolution === null ? (
+          <div className="space-y-3 rounded-lg border border-dashed border-line p-8 text-center text-sm text-muted">
+            <p>
+              未找到 damai_shots 截图目录。抢票失败时的现场截图（
+              <code>open_fail_*</code> / <code>no_buy_btn_*</code> /{" "}
+              <code>ready_for_human_*</code> / <code>grab_fail_*</code> 等）出现后，此处会自动显示。
+            </p>
+            <p className="text-xs">
+              也可用环境变量 <code>DAMAI_WEB_SHOTS_DIR</code> 显式指定目录。已检查的候选：
+            </p>
+            <ul className="space-y-1 text-xs">
+              {shotsDirCandidates().map((c) => (
+                <li key={c.source} className="font-mono">
+                  {c.dir} — {c.exists ? "存在" : "不存在"}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : readError !== null ? (
+          <div className="rounded-lg border border-danger/30 bg-danger/10 p-6 text-center text-xs text-danger">
+            读取截图目录失败（{resolution.dir}）：{readError}
+          </div>
+        ) : shots.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-line p-8 text-center text-sm text-muted">
+            截图目录（{resolution.dir}）暂无 PNG 截图。
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4">
+            {shots.map((shot) => (
+              <figure
+                key={shot.name}
+                className="overflow-hidden rounded-lg border border-line bg-surface transition-all hover:border-line-strong"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={`/screenshots/file/${encodeURIComponent(shot.name)}`}
+                  alt={`失败截图 ${shot.name}`}
+                  loading="lazy"
+                  className="aspect-[9/16] w-full object-contain bg-paper"
+                />
+                <figcaption className="space-y-1 border-t border-line p-2.5">
+                  <p className="break-all font-mono text-[11px] font-medium text-ink">
+                    {shot.name}
+                  </p>
+                  <p className="font-mono text-[10px] text-muted">
+                    {shot.mtimeMs > 0 ? new Date(shot.mtimeMs).toLocaleString("zh-CN") : "—"}
+                  </p>
+                </figcaption>
+              </figure>
             ))}
-          </ul>
-        </div>
-      ) : readError !== null ? (
-        <div className="rounded-xl border border-dashed border-red-300 p-8 text-center text-sm text-red-500 dark:border-red-800">
-          读取截图目录失败（{resolution.dir}）：{readError}
-        </div>
-      ) : shots.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-zinc-300 p-8 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
-          截图目录（{resolution.dir}）暂无 PNG 截图。
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-          {shots.map((shot) => (
-            <figure
-              key={shot.name}
-              className="overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={`/screenshots/file/${encodeURIComponent(shot.name)}`}
-                alt={`失败截图 ${shot.name}`}
-                loading="lazy"
-                className="aspect-[9/16] w-full object-contain"
-              />
-              <figcaption className="space-y-0.5 border-t border-zinc-100 px-2 py-1.5 dark:border-zinc-900">
-                <p className="break-all font-mono text-xs text-zinc-700 dark:text-zinc-300">
-                  {shot.name}
-                </p>
-                <p className="text-xs text-zinc-400">
-                  {shot.mtimeMs > 0 ? new Date(shot.mtimeMs).toLocaleString("zh-CN") : "—"}
-                </p>
-              </figcaption>
-            </figure>
-          ))}
-        </div>
-      )}
+          </div>
+        )}
+      </section>
     </div>
   );
 }

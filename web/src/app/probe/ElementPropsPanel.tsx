@@ -1,29 +1,55 @@
 "use client";
 
+import { useState } from "react";
 import { formatBounds, probeElementToString, type ProbeElement } from "./tree";
 
-const TH_CLS = "py-1 pr-4 align-top font-medium text-zinc-500 dark:text-zinc-400";
-const TD_CLS = "py-1 pr-4 font-mono text-xs break-all text-zinc-800 dark:text-zinc-200";
+const TH_CLS = "py-1.5 pr-4 align-top font-medium text-muted whitespace-nowrap";
+const TD_CLS = "py-1.5 pr-4 font-mono text-xs break-all text-ink";
 
 /**
- * 元素属性面板（设计稿 §7.1「证据」面板）：`UIElement.toString()` 证据行 +
- * toDict 全字段表 + 原生 attrs + core 来源注脚。
+ * 元素属性核查面板：
+ * - 顶部证据行 + 一键复制 XPath / ID
+ * - 全属性键值核查表
+ * - 原生 attrs 与 core 源码证据链
  */
 export function ElementPropsPanel({
   element,
   footnote,
 }: {
   element: ProbeElement | null;
-  /** core 来源注脚（path:line），如 `src/inspector/dump.ts:102 dumpUi`。 */
   footnote?: string;
 }) {
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
   if (element === null) {
     return (
-      <div className="rounded-lg border border-dashed border-zinc-300 p-6 text-center text-sm text-zinc-400 dark:border-zinc-700">
-        点击左侧任一元素查看属性与证据。
+      <div className="flex h-64 flex-col items-center justify-center rounded-lg border border-dashed border-line p-6 text-center">
+        <p className="text-sm font-medium text-ink">未选定控件节点</p>
+        <p className="mt-1 text-xs text-muted">点击左侧 UI 树或结果表中的任意节点，在此检查其属性与选择器证据。</p>
       </div>
     );
   }
+
+  const copyText = (text: string, key: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 1500);
+  };
+
+  const buildXPathSuggestion = (el: ProbeElement): string => {
+    if (el.resource_id) {
+      return `//*[@resource-id="${el.resource_id}"]`;
+    }
+    if (el.text) {
+      return `//*[@text="${el.text}"]`;
+    }
+    if (el.content_desc) {
+      return `//*[@content-desc="${el.content_desc}"]`;
+    }
+    return `//${el.class_name}`;
+  };
+
+  const xpathSuggestion = buildXPathSuggestion(element);
 
   const rows: Array<[string, string]> = [
     ["index", element.index === null ? "—（findByText 不含 dump 位置）" : String(element.index)],
@@ -42,27 +68,54 @@ export function ElementPropsPanel({
   ];
 
   return (
-    <div className="space-y-3">
-      <code className="block rounded-lg bg-zinc-100 px-3 py-2 font-mono text-xs text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
-        {probeElementToString(element)}
-      </code>
-      <table className="w-full text-xs">
-        <tbody>
-          {rows.map(([key, value]) => (
-            <tr key={key} className="border-b border-zinc-100 dark:border-zinc-900">
-              <th className={TH_CLS}>{key}</th>
-              <td className={TD_CLS}>{value}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="space-y-4">
+      {/* 快捷选择器建议 */}
+      <div className="rounded-lg border border-line bg-surface-raised p-3">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-medium text-muted">XPath 引用建议</span>
+          <button
+            type="button"
+            onClick={() => copyText(xpathSuggestion, "xpath")}
+            className="rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[11px] text-muted hover:text-ink"
+          >
+            {copiedKey === "xpath" ? "已复制" : "复制 XPath"}
+          </button>
+        </div>
+        <div className="mt-1.5 font-mono text-xs text-accent break-all select-all">
+          {xpathSuggestion}
+        </div>
+      </div>
+
+      {/* 证据签名行 */}
+      <div className="relative group">
+        <code className="block rounded-lg border border-line bg-paper px-3 py-2 font-mono text-xs text-ink break-all">
+          {probeElementToString(element)}
+        </code>
+      </div>
+
+      {/* 全字段属性总表 */}
+      <div>
+        <h3 className="text-xs font-semibold text-ink mb-2">控件属性详情</h3>
+        <table className="w-full text-xs">
+          <tbody>
+            {rows.map(([key, value]) => (
+              <tr key={key} className="border-b border-line">
+                <th className={TH_CLS}>{key}</th>
+                <td className={TD_CLS}>{value}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* 原生 attributes */}
       {element.attrs !== undefined ? (
         <div>
-          <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">原生 attrs</p>
-          <table className="mt-1 w-full text-xs">
+          <h3 className="text-xs font-semibold text-ink mb-2">原生 attrs</h3>
+          <table className="w-full text-xs">
             <tbody>
               {Object.entries(element.attrs).map(([key, value]) => (
-                <tr key={key} className="border-b border-zinc-100 dark:border-zinc-900">
+                <tr key={key} className="border-b border-line">
                   <th className={TH_CLS}>{key}</th>
                   <td className={TD_CLS}>{value === "" ? "（空）" : value}</td>
                 </tr>
@@ -71,8 +124,9 @@ export function ElementPropsPanel({
           </table>
         </div>
       ) : null}
+
       {footnote ? (
-        <p className="text-xs text-zinc-400 dark:text-zinc-500">证据来源：{footnote}</p>
+        <p className="text-[11px] text-muted">证据来源：{footnote}</p>
       ) : null}
     </div>
   );

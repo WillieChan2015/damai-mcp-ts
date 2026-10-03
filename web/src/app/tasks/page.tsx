@@ -1,22 +1,31 @@
+import { DeviceManager } from "@core/device/manager";
 import { getTaskManager } from "@/task/manager";
 
 import { TaskPanel } from "./TaskPanel";
+import { PageHeader } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
 
-export const metadata = { title: "抢票任务 · Damai Console" };
+export const metadata = { title: "抢票任务作战舱 · damai-mcp-ts" };
 
-export default function TasksPage() {
+export default async function TasksPage() {
   const manager = getTaskManager();
+
+  let devices: Array<{ deviceId: string; model?: string }> = [];
+  try {
+    const list = await DeviceManager.shared().listDevices(true);
+    devices = list.map((d) => ({ deviceId: d.deviceId, model: d.model }));
+  } catch {
+    devices = [];
+  }
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">抢票任务</h1>
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          NTP 校时 → 详情页预热 → 开票判定（去抖门）→ 抢档 → 选人；取消在候场阶段即时生效。
-        </p>
-      </div>
-      <TaskPanel initialTasks={manager.list()} />
+      <PageHeader
+        title="抢票任务作战舱"
+        lede="全流程六阶门控：NTP 校时 → 详情页预热 → 开票去抖门 → 锁定票档 → 选中观演人 → 交付人工核验与支付。"
+      />
+      <TaskPanel initialTasks={manager.list()} devices={devices} />
     </div>
   );
 }

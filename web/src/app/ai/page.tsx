@@ -2,6 +2,7 @@ import { getAiSettingsStatus } from "@/lib/aiConfig";
 
 import { ChatPanel } from "./ChatPanel";
 import { SettingsForm } from "./SettingsForm";
+import { PageHeader } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
 
@@ -20,11 +21,7 @@ export default function AiPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">AI 助手</h1>
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          OpenAI 兼容 provider 动态可插：对话中可调用只读探查工具（列设备 / 设备详情 /
-          dump UI / 查找文本 / 监控任务）。AI 绝不执行点击/下单/支付等写操作。
-        </p>
+        <PageHeader title="AI 助手" lede="OpenAI 兼容 provider 动态可插：对话中可调用只读探查工具（列设备 / 设备详情 / dump UI / 查找文本 / 监控任务）。AI 绝不执行点击/下单/支付等写操作。" />
       </div>
 
       <div id="ai-settings">

@@ -2,20 +2,31 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 
 import type { TaskSnapshot } from "@/task/manager";
 
 import { cancelTask } from "./actions";
 import { ProgressViewer } from "./ProgressViewer";
-import { TaskForm } from "./TaskForm";
+import { TaskForm, type TaskFormDevice } from "./TaskForm";
 import { TaskTable } from "./TaskTable";
+import { Glyph, Panel } from "@/components/ui";
 
-/** 任务页主面板：表单 + 任务列表（轮询）+ 选中任务的实时进度（SSE）。 */
-export function TaskPanel({ initialTasks }: { initialTasks: TaskSnapshot[] }) {
+/**
+ * 抢票任务双栏作战舱面板：
+ * 左侧：任务启动台 (42%)
+ * 右侧：实时监控室与控制台 (58%)
+ * 底部：历史任务审计与切换
+ */
+export function TaskPanel({
+  initialTasks,
+  devices = [],
+}: {
+  initialTasks: TaskSnapshot[];
+  devices?: TaskFormDevice[];
+}) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cancelError, setCancelError] = useState<string | null>(null);
 
   const { data } = useQuery({
@@ -32,6 +43,19 @@ export function TaskPanel({ initialTasks }: { initialTasks: TaskSnapshot[] }) {
   });
   const tasks = data.tasks;
 
+  // 默认选中：优先选中正在运行/取消中的任务；其次选中最新的任务
+  const [selectedId, setSelectedId] = useState<string | null>(() => {
+    const running = initialTasks.find((t) => t.status === "running" || t.status === "cancelling");
+    return running?.id ?? initialTasks[0]?.id ?? null;
+  });
+
+  // 如果当前选中的任务不存在且列表有任务，兜底重设
+  useEffect(() => {
+    if (!selectedId && tasks.length > 0) {
+      setSelectedId(tasks[0].id);
+    }
+  }, [selectedId, tasks]);
+
   const onCancel = (taskId: string): void => {
     setCancelError(null);
     startTransition(async () => {
@@ -44,50 +68,90 @@ export function TaskPanel({ initialTasks }: { initialTasks: TaskSnapshot[] }) {
     });
   };
 
-  const cancellable = (t: TaskSnapshot | undefined): boolean =>
-    t !== undefined && (t.status === "running" || t.status === "cancelling");
   const selectedTask = selectedId ? tasks.find((t) => t.id === selectedId) : undefined;
+  const isCancellable =
+    selectedTask !== undefined &&
+    (selectedTask.status === "running" || selectedTask.status === "cancelling");
 
   return (
-    <div className="space-y-8">
-      <section className="rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-        <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">新建抢票任务</h2>
-        <div className="mt-4">
-          <TaskForm onStarted={(taskId) => setSelectedId(taskId)} />
-        </div>
-      </section>
+    <div className="space-y-6">
+      {/* 顶部双栏作战舱 */}
+      <div className="grid gap-6 lg:grid-cols-12">
+        {/* 左侧：任务启动台 (5/12, ~42%) */}
+        <section className="lg:col-span-5">
+          <Panel
+            title="任务启动台"
+            actions={
+              <span className="text-xs text-muted">
+                {devices.length} 台可用设备
+              </span>
+            }
+          >
+            <TaskForm
+              devices={devices}
+              onStarted={(newId) => {
+                setSelectedId(newId);
+              }}
+            />
+          </Panel>
+        </section>
 
-      <section className="rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-        <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">任务列表</h2>
-          <span className="text-xs text-zinc-400">1.5s 自动刷新</span>
-        </div>
-        <div className="mt-3">
-          {tasks.length === 0 ? (
-            <p className="text-sm text-zinc-400">还没有任务——用上方表单启动一个。</p>
-          ) : (
-            <TaskTable tasks={tasks} selectedId={selectedId} onSelect={setSelectedId} />
-          )}
-        </div>
-        {cancelError ? <p className="mt-2 text-xs text-red-600">{cancelError}</p> : null}
-        {selectedId ? (
-          <div className="mt-4">
-            <button
-              type="button"
-              onClick={() => onCancel(selectedId)}
-              disabled={isPending || !cancellable(selectedTask)}
-              className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-40 dark:border-red-900 dark:hover:bg-red-950"
-            >
-              取消选中任务
-            </button>
+        {/* 右侧：实时监控室与控制台 (7/12, ~58%) */}
+        <section className="lg:col-span-7">
+          <Panel
+            title={
+              selectedTask
+                ? `作战监视室 · ${selectedTask.label || selectedTask.id.slice(0, 8)}`
+                : "作战监视室"
+            }
+            actions={
+              selectedTask ? (
+                <div className="flex items-center gap-2">
+                  {isCancellable ? (
+                    <button
+                      type="button"
+                      onClick={() => onCancel(selectedTask.id)}
+                      disabled={isPending}
+                      className="btn btn-danger px-2.5 py-1 text-xs"
+                    >
+                      {isPending ? "取消中…" : "中止任务"}
+                    </button>
+                  ) : null}
+                </div>
+              ) : undefined
+            }
+          >
+            {cancelError ? (
+              <div className="mb-3 rounded border border-danger/30 bg-danger/10 p-2 text-xs text-danger">
+                {cancelError}
+              </div>
+            ) : null}
+            <ProgressViewer taskId={selectedId} />
+          </Panel>
+        </section>
+      </div>
+
+      {/* 底部：历史任务审计与调阅 */}
+      <section className="panel overflow-hidden">
+        <div className="flex items-center justify-between border-b border-line px-5 py-3">
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-ink">任务审计总表</h2>
+            <span className="font-mono text-xs text-muted">({tasks.length} 条)</span>
           </div>
-        ) : null}
-      </section>
+          <div className="flex items-center gap-2 font-mono text-[11px] text-muted">
+            <Glyph name="refresh" className="h-3.5 w-3.5 text-muted animate-spin" />
+            <span>1.5s 持续轮询</span>
+          </div>
+        </div>
 
-      <section className="rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-        <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">实时进度</h2>
-        <div className="mt-3">
-          <ProgressViewer taskId={selectedId} />
+        <div className="p-5">
+          {tasks.length === 0 ? (
+            <p className="text-sm text-muted">还没有任务——用上方启动台创建第一个抢票任务。</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <TaskTable tasks={tasks} selectedId={selectedId} onSelect={setSelectedId} />
+            </div>
+          )}
         </div>
       </section>
     </div>
