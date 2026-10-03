@@ -11,7 +11,10 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "serve": "bun run src/cli.ts serve"
+    "serve": "bun run src/cli.ts serve",
+    "web": "bun run src/cli.ts web",
+    "web:dev": "bun run src/cli.ts web --mode dev",
+    "web:build": "pnpm -C web run build"
   },
   "devDependencies": {
     "@types/node": "^22",

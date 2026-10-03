@@ -87,7 +87,7 @@ Caddy 默认流式转发，用 `flush_interval -1` 显式强制。同时**不要
 
 ```caddyfile
 console.example.com {
-    reverse_proxy 127.0.0.1:3000 {
+    reverse_proxy 127.0.0.1:6123 {
         flush_interval -1   # SSE：立即冲刷，不做缓冲
     }
 }
@@ -103,7 +103,7 @@ server {
     # ssl_certificate_key /etc/letsencrypt/live/console.example.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://127.0.0.1:6123;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $remote_addr;
@@ -130,19 +130,19 @@ location / {
 **首选方案：保持 127.0.0.1 + SSH 隧道**（零新增暴露面，无需 HTTPS 证书）：
 
 ```bash
-# 在你自己的机器上执行；之后本地浏览器打开 http://127.0.0.1:3000
-ssh -N -L 3000:127.0.0.1:3000 user@server
+# 在你自己的机器上执行；之后本地浏览器打开 http://127.0.0.1:6123
+ssh -N -L 6123:127.0.0.1:6123 user@server
 ```
 
 确需内网/公网直连时，**仅放行可信源 IP，禁用全网段放行**：
 
 ```bash
-# ufw：仅允许内网网段访问 3000
-ufw allow from 192.168.1.0/24 to any port 3000 proto tcp
+# ufw：仅允许内网网段访问 6123
+ufw allow from 192.168.1.0/24 to any port 6123 proto tcp
 
 # iptables 等价（同时显式拒绝其余来源）
-iptables -A INPUT -p tcp --dport 3000 -s 192.168.1.0/24 -j ACCEPT
-iptables -A INPUT -p tcp --dport 3000 -j DROP
+iptables -A INPUT -p tcp --dport 6123 -s 192.168.1.0/24 -j ACCEPT
+iptables -A INPUT -p tcp --dport 6123 -j DROP
 ```
 
 云主机场景优先用安全组做同样的事。**不要** `--host 0.0.0.0` + 防火墙全放行——那等于

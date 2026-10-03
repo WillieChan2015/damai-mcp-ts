@@ -120,7 +120,7 @@ export async function main(): Promise<void> {
       .default("start"),
   );
   webP.option("--host <host>", "绑定地址（默认仅本机）", "127.0.0.1");
-  webP.option("--port <port>", "端口", pyIntArg, 3000);
+  webP.option("--port <port>", "端口", pyIntArg, 6123);
   webP.option(
     "--token <token>",
     "访问 token（--host 为非回环地址时必填；回环绑定缺省自动生成并打印）",
@@ -589,6 +589,16 @@ export function assertWebBinding(host: string, hasExplicitToken: boolean): boole
 }
 
 /**
+ * 拼一键登录链接（浏览器打开即自动完成鉴权）。
+ *
+ * 鉴权由 `web/src/proxy.ts` 的 `?token` 分支承接：校验通过后种 httpOnly
+ * Cookie 并去掉 token 查询参数重定向到原路径。
+ */
+export function webLoginUrl(host: string, port: number, token: string): string {
+  return `http://${host}:${port}/?token=${token}`;
+}
+
+/**
  * web 子命令：启动可视化控制台（Next.js 16 全栈应用，位于仓库根 `web/`）。
  *
  * 安全护栏（docs/plans/web-console-plan.md D6，经 {@link assertWebBinding} 落实）：
@@ -623,8 +633,9 @@ async function cmdWeb(
   logger.info(
     `web 控制台: http://${host}:${port} (mode=${mode}${loopback ? "，仅本机可访问" : "，对所在网段可见"})`,
   );
+  logger.info(`一键登录（浏览器打开即自动完成鉴权）: ${webLoginUrl(host, port, effectiveToken)}`);
   logger.info(
-    `访问 token: ${effectiveToken}  （浏览器打开 /api/token?token=<token> 换取 Cookie，或请求携带 x-web-token 头）`,
+    `访问 token: ${effectiveToken}  （curl 用 x-web-token 头；也可经 /api/token?token=<token> 换取 Cookie）`,
   );
 
   // 用显式 node 而非 process.execPath：cli 可由 bun 运行，而 next 交给 node 更稳

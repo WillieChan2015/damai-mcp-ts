@@ -10,7 +10,16 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { assertWebBinding } from "../src/cli";
+import { assertWebBinding, webLoginUrl } from "../src/cli";
+
+describe("webLoginUrl（一键登录链接）", () => {
+  it("拼出 {host}:{port}/?token=xxx 形态", () => {
+    expect(webLoginUrl("127.0.0.1", 6123, "abc123")).toBe("http://127.0.0.1:6123/?token=abc123");
+  });
+  it("localhost 与非默认端口同样成立", () => {
+    expect(webLoginUrl("localhost", 3000, "t")).toBe("http://localhost:3000/?token=t");
+  });
+});
 
 describe("assertWebBinding", () => {
   it("回环 127.0.0.1 未显式提供 token：放行并返回 true", () => {
