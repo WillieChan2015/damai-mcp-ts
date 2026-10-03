@@ -15,12 +15,16 @@ import type { TaskRunner } from "./manager";
 export function makeGrabRunner(input: GrabTaskInput): TaskRunner {
   return async ({ stopEvent, onProgress }) => {
     onProgress(
-      `任务启动 device=${input.deviceId} item=${input.itemId} 票档=${input.priceIndex} ` +
+      `任务启动 device=${input.deviceId} item=${input.itemId} ` +
+        `场次=${input.sessionLabel || input.sessionIndex} 票档=${input.priceLabel || input.priceIndex} ` +
         `观演人=${input.viewerNames?.length ?? 0} 人 open_time=${input.openTime || "立即抢"}`,
     );
     const result = await runChecklist(input.deviceId, input.itemId, {
       openTime: input.openTime,
+      sessionIndex: input.sessionIndex,
+      sessionLabel: input.sessionLabel,
       priceIndex: input.priceIndex,
+      priceLabel: input.priceLabel,
       viewerNames: input.viewerNames ?? null,
       ticketNum: input.ticketNum,
       preheatSeconds: input.preheatSeconds,

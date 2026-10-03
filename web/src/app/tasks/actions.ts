@@ -3,6 +3,8 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
+import { damaiReadPurchaseSheet } from "@core/damai/actions";
+import type { PurchaseSheetOptions } from "@core/damai/purchaseSheet";
 import { grabTaskInputSchema } from "@core/schemas/grab";
 
 import { actionClient } from "@/lib/safe-action";
@@ -41,6 +43,22 @@ export const saveViewerPresets = actionClient
     }
     const names = saveViewerPresetsStore(prepared.names);
     return { names };
+  });
+
+/** 打开购买弹层，读出场次和票档。不点「确定」。设备上已有任务时拒绝。 */
+export const readPurchaseSheet = actionClient
+  .metadata({ operation: "读取场次与票档" })
+  .schema(
+    z.object({
+      deviceId: z.string().min(1),
+      itemId: z.string().min(1),
+    }),
+  )
+  .action(async ({ parsedInput }): Promise<PurchaseSheetOptions> => {
+    if (getTaskManager().lockedDeviceIds().includes(parsedInput.deviceId)) {
+      throw new Error(`设备 ${parsedInput.deviceId} 已有运行中的任务，请先停止后再读取场次与票档`);
+    }
+    return damaiReadPurchaseSheet(parsedInput.deviceId, parsedInput.itemId);
   });
 
 /** 取消任务：置位 stopEvent；候场阶段在下一个检查点退出（D9）。 */

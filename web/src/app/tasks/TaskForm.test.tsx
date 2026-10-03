@@ -7,6 +7,7 @@ const saveViewerPresets = vi.hoisted(() => vi.fn());
 vi.mock("./actions", () => ({
   saveViewerPresets,
   startGrabTask: vi.fn(),
+  readPurchaseSheet: vi.fn(),
 }));
 
 import { TaskForm } from "./TaskForm";
@@ -15,6 +16,13 @@ describe("TaskForm 观演人快捷项", () => {
   afterEach(() => {
     cleanup();
     saveViewerPresets.mockReset();
+  });
+
+  it("未读取弹层时显示场次序号、票档序号，读取按钮在没有演出时不可用", () => {
+    render(<TaskForm devices={[]} viewerPresets={[]} onStarted={() => undefined} />);
+    expect(screen.getByText("场次序号 (1-based)")).toBeTruthy();
+    expect(screen.getByText("票档序号 (1-based)")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "读取场次与票档" })).toHaveProperty("disabled", true);
   });
 
   it("没有已保存名单时不渲染示例姓名", () => {

@@ -183,6 +183,7 @@ export async function main(): Promise<void> {
     "开票时间 'YYYY-MM-DD HH:MM:SS'，空=立即抢",
     "",
   );
+  grabP.option("--session <session>", "场次序号（1-based）", pyIntArg, 1);
   grabP.option("--price <price>", "票档序号（1-based）", pyIntArg, 1);
   grabP.option("--viewer <viewer>", "观演人姓名（可多次 --viewer 张三）", appendArg, []);
   grabP.option("--num <num>", "张数", pyIntArg, 1);
@@ -390,6 +391,7 @@ async function cmdGrab(opts: {
   device: string;
   itemId: string;
   openTime: string;
+  session: number;
   price: number;
   viewer: string[];
   num: number;
@@ -411,10 +413,11 @@ async function cmdGrab(opts: {
 
   logger.info(
     `检查清单启动: device=${opts.device} item=${opts.itemId} ` +
-      `开票=${opts.openTime || "now"} 票档=${opts.price}`,
+      `开票=${opts.openTime || "now"} 场次=${opts.session} 票档=${opts.price}`,
   );
   const result = await runChecklist(opts.device, opts.itemId, {
     openTime: opts.openTime,
+    sessionIndex: opts.session,
     priceIndex: opts.price,
     viewerNames: opts.viewer,
     ticketNum: opts.num,
@@ -474,6 +477,9 @@ async function cmdAppGrab(
       {
         preheatSeconds: pyFloatCast(options["preheat_seconds"] ?? 0.0),
         maxRuntimeSec: pyFloatCast(options["max_runtime_sec"] ?? 60.0),
+        sessionIndex: pyIntCast(options["session_index"] ?? 1),
+        sessionLabel: options["session_label"] === undefined ? "" : String(options["session_label"]),
+        priceLabel: options["price_label"] === undefined ? "" : String(options["price_label"]),
       },
     );
     result = { profile: "damai", status: grab.status, grab_result: grab };

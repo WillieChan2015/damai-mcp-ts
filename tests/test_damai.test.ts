@@ -19,6 +19,8 @@ import {
   classifyGrabBlocker,
   damaiGrab,
   damaiLoginCheck,
+  damaiSelectPrice,
+  damaiSelectSession,
   isInViewerNameList,
   parseIso,
   waitUntil,
@@ -26,6 +28,7 @@ import {
 import type { DamaiGrabOptions } from "../src/damai/actions";
 import { DamaiSelectors, GrabConfig } from "../src/damai/selectors";
 import { UIElement } from "../src/inspector/models";
+import { parsePurchaseSheet } from "../src/damai/purchaseSheet";
 import { ADBError, UIElementNotFoundError } from "../src/utils/errors";
 
 // ---- 桩（vi.hoisted 保证先于 vi.mock 工厂与静态导入初始化） --------------------
@@ -375,7 +378,8 @@ async function runGrabToConfirm(
     let dumpCalls = 0;
     dumpUiMock.mockImplementation(async () => {
       dumpCalls += 1;
-      if (dumpCalls === 1) {
+      // 第 1 次是场次扫描，第 2 次是票档扫描；其后才是提交后的验证 dump
+      if (dumpCalls <= 2) {
         return [new UIElement({ tag: "node", text: "¥680", bounds: [0, 100, 200, 160] })];
       }
       if (dumpAfterPrice instanceof Error) {
@@ -792,6 +796,9 @@ describe("damai_grab captcha 拦截（needs_human_captcha）", () => {
       .mockResolvedValueOnce([
         new UIElement({ tag: "node", text: "¥680", bounds: [0, 100, 200, 160] }),
       ])
+      .mockResolvedValueOnce([
+        new UIElement({ tag: "node", text: "¥680", bounds: [0, 100, 200, 160] }),
+      ])
       .mockResolvedValue([CAPTCHA_ELEMENT]);
 
     const result = await damaiGrab("device", "item", 1, ["杨安琪"], 1, "", {
@@ -813,8 +820,11 @@ describe("damai_grab captcha 拦截（needs_human_captcha）", () => {
       }
       return buyButton;
     });
-    // 第 1 次 dump：选票档扫描；第 2 次 dump：captcha 检测
+    // 前两次 dump：场次扫描与选票档；其后：captcha 检测
     dumpUiMock
+      .mockResolvedValueOnce([
+        new UIElement({ tag: "node", text: "¥680", bounds: [0, 100, 200, 160] }),
+      ])
       .mockResolvedValueOnce([
         new UIElement({ tag: "node", text: "¥680", bounds: [0, 100, 200, 160] }),
       ])
@@ -911,7 +921,7 @@ describe("damai_grab 提交后订单验证（order_seen）", () => {
     expect(tapMock.mock.calls.length).toBe(3);
   });
 
-  it("verifyOrder=false → 完全不做提交后 dump（dumpUi 仅选票档那一次）", async () => {
+  it("verifyOrder=false → 完全不做提交后 dump（dumpUi 只有场次和票档各一次）", async () => {
     const result = await runGrabToConfirm(async () => {}, {
       grabOptions: { verifyOrder: false },
       dumpAfterPrice: [PAY_EVIDENCE], // 若开了验证本可命中——反证确实没 dump
@@ -919,7 +929,7 @@ describe("damai_grab 提交后订单验证（order_seen）", () => {
 
     expect(result.status).toBe("submitted");
     expect(result.order_seen).toBeUndefined();
-    expect(dumpUiMock.mock.calls.length).toBe(1);
+    expect(dumpUiMock.mock.calls.length).toBe(2);
   });
 
   it("订单验证 dump 抛错 → 吞掉，order_seen=false，status 仍 submitted", async () => {
@@ -943,5 +953,158 @@ describe("damai_grab 提交后订单验证（order_seen）", () => {
     expect(result.requires_human_confirmation).toBe(true);
     // 绝不为过滑块 tap：仍只有 购买/票档/确认 三次
     expect(tapMock.mock.calls.length).toBe(3);
+  });
+});
+
+function sheetNode(
+  text: string,
+  bounds: readonly [number, number, number, number],
+  selected = false,
+): UIElement {
+  return new UIElement({ tag: "node", text, bounds, selected });
+}
+
+/** 截图布局：两场、七档、角标、底部合计。 */
+function screenshotSheet(): UIElement[] {
+  return [
+    sheetNode("2026-01-01 公告日期", [16, 80, 300, 110]),
+    sheetNode("场次", [16, 180, 80, 210]),
+    sheetNode("2026-10-17 周六 18:30", [16, 240, 360, 300]),
+    sheetNode("预售", [300, 250, 350, 280]),
+    sheetNode("2026-10-18 周日 18:30", [16, 320, 360, 380]),
+    sheetNode("预售", [300, 330, 350, 360]),
+    sheetNode("票档", [16, 400, 80, 430]),
+    sheetNode("看台488元", [16, 450, 180, 510]),
+    sheetNode("缺货登记", [120, 460, 175, 490]),
+    sheetNode("看台588元", [200, 450, 370, 510]),
+    sheetNode("缺货登记", [300, 460, 360, 490]),
+    sheetNode("看台688元", [16, 530, 120, 590]),
+    sheetNode("看台888元", [140, 530, 250, 590]),
+    sheetNode("内场988元", [270, 530, 380, 590]),
+    sheetNode("内场1288元", [16, 610, 180, 670]),
+    sheetNode("内场1688元", [200, 610, 370, 670]),
+    sheetNode("¥0", [16, 750, 80, 790]),
+    sheetNode("确定", [250, 740, 380, 790]),
+  ];
+}
+
+describe("购买弹层场次与票档", () => {
+  it("按截图顺序解析，缺货角标只标售罄，¥0 和公告日期不占一项", () => {
+    const sheet = parsePurchaseSheet(screenshotSheet());
+    expect(sheet.sessions.map((session) => session.label)).toEqual([
+      "2026-10-17 周六 18:30",
+      "2026-10-18 周日 18:30",
+    ]);
+    expect(sheet.prices.map((price) => price.label)).toEqual([
+      "看台488元",
+      "看台588元",
+      "看台688元",
+      "看台888元",
+      "内场988元",
+      "内场1288元",
+      "内场1688元",
+    ]);
+    expect(sheet.prices.map((price) => price.soldOut)).toEqual([
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+    ]);
+  });
+
+  it("没有票档标题时，¥680 仍按旧序号命中，确定旁边的 ¥0 不算", () => {
+    const sheet = parsePurchaseSheet([
+      sheetNode("¥680", [0, 100, 200, 160]),
+      sheetNode("¥0", [16, 750, 80, 790]),
+      sheetNode("确定", [250, 740, 380, 790]),
+    ]);
+    expect(sheet.sessions).toEqual([]);
+    expect(sheet.prices.map((price) => price.label)).toEqual(["¥680"]);
+  });
+
+  it("按文字点中内场988元，不点底部 ¥0", async () => {
+    dumpUiMock.mockResolvedValue(screenshotSheet());
+    waitMsMock.mockResolvedValue(undefined);
+    tapMock.mockResolvedValue(undefined);
+
+    const price = await damaiSelectPrice("device", 1, { priceLabel: "内场988元" });
+    const session = await damaiSelectSession("device", 2);
+
+    expect(price.text).toBe("内场988元");
+    expect(tapMock).toHaveBeenNthCalledWith(1, "device", 325, 560);
+    expect(session?.text).toBe("2026-10-18 周日 18:30");
+    expect(tapMock).toHaveBeenNthCalledWith(2, "device", 188, 350);
+  });
+
+  it("票档文字对不上时失败，且不退回序号", async () => {
+    dumpUiMock.mockResolvedValue(screenshotSheet());
+    waitMsMock.mockResolvedValue(undefined);
+
+    await expect(damaiSelectPrice("device", 1, { priceLabel: "看台999元" })).rejects.toThrow(
+      "未找到票档「看台999元」",
+    );
+    expect(tapMock).not.toHaveBeenCalled();
+  });
+
+  it("票档序号越界时带上实际卡片", async () => {
+    dumpUiMock.mockResolvedValue(screenshotSheet());
+    waitMsMock.mockResolvedValue(undefined);
+
+    await expect(damaiSelectPrice("device", 8)).rejects.toThrow("price_index=8 超出范围 (1..7)");
+  });
+
+  it("预约页认带说明的票档，可预约和已预约不占一项，已选中的不再点", async () => {
+    const reserved = [
+      sheetNode("提前预约想看的场次和票档", [16, 80, 360, 120]),
+      sheetNode("预约想看场次", [16, 180, 160, 210]),
+      sheetNode("场次时间均为演出当地时间", [170, 184, 360, 208]),
+      sheetNode("2026-12-04 周五 19:00", [16, 230, 360, 290]),
+      sheetNode("预售", [280, 240, 330, 270]),
+      sheetNode("2026-12-05 周六 19:00", [16, 310, 360, 370]),
+      sheetNode("预售", [280, 320, 330, 350]),
+      sheetNode("2026-12-06 周日 19:00", [16, 390, 360, 450], true),
+      sheetNode("预售", [280, 400, 330, 430]),
+      sheetNode("预约想看票档", [16, 470, 160, 500]),
+      sheetNode("看台580元（大屏观演区，仅支持看大屏）", [16, 520, 360, 590]),
+      sheetNode("可预约", [250, 530, 320, 560]),
+      sheetNode("看台780元", [16, 610, 180, 670]),
+      sheetNode("可预约", [100, 620, 160, 650]),
+      sheetNode("看台1080元", [200, 610, 370, 670]),
+      sheetNode("看台1380元", [16, 690, 180, 750]),
+      sheetNode("内场1880元", [200, 690, 370, 750], true),
+      sheetNode("可预约", [280, 700, 340, 730]),
+      sheetNode("内场2080元", [16, 770, 180, 830]),
+      sheetNode("内场2380元", [200, 770, 370, 830]),
+      sheetNode("取消预约", [16, 900, 100, 960]),
+      sheetNode("已预约", [140, 900, 370, 960]),
+    ];
+    const sheet = parsePurchaseSheet(reserved);
+    expect(sheet.sessions.map((session) => session.label)).toEqual([
+      "2026-12-04 周五 19:00",
+      "2026-12-05 周六 19:00",
+      "2026-12-06 周日 19:00",
+    ]);
+    expect(sheet.sessions[2]?.picked).toBe(true);
+    expect(sheet.prices.map((price) => price.label)).toEqual([
+      "看台580元（大屏观演区，仅支持看大屏）",
+      "看台780元",
+      "看台1080元",
+      "看台1380元",
+      "内场1880元",
+      "内场2080元",
+      "内场2380元",
+    ]);
+    expect(sheet.prices.every((price) => !price.soldOut)).toBe(true);
+    expect(sheet.prices[4]?.picked).toBe(true);
+
+    dumpUiMock.mockResolvedValue(reserved);
+    waitMsMock.mockResolvedValue(undefined);
+    tapMock.mockResolvedValue(undefined);
+    const price = await damaiSelectPrice("device", 1, { priceLabel: "内场1880元" });
+    expect(price.text).toBe("内场1880元");
+    expect(tapMock).not.toHaveBeenCalled();
   });
 });

@@ -4,17 +4,35 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 
+import type { PurchaseSheetOptions } from "@core/damai/purchaseSheet";
 import { grabTaskInputSchema } from "@core/schemas/grab";
 
 import { DateTimeField } from "@/components/DateTimeField";
 import { DeviceSelect } from "@/components/DeviceSelect";
 import { ShowField } from "@/components/ShowField";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { type DeviceIdentity } from "@/lib/deviceLabel";
 import { prepareViewerPresets, VIEWER_PRESET_NAME_MAX } from "@/lib/viewerPresetRules";
-import { saveViewerPresets, startGrabTask } from "./actions";
+import { readPurchaseSheet, saveViewerPresets, startGrabTask } from "./actions";
+
+function priceOptionLabel(price: { label: string; soldOut: boolean; picked: boolean }): string {
+  if (price.soldOut) {
+    return `${price.label}（缺货登记）`;
+  }
+  if (price.picked) {
+    return `${price.label}（已选）`;
+  }
+  return price.label;
+}
 
 export interface TaskFormDevice extends DeviceIdentity {
   deviceId: string;
@@ -49,7 +67,10 @@ export function TaskForm({
     defaultValues: {
       deviceId: defaultDeviceId,
       itemId: "",
+      sessionIndex: 1,
+      sessionLabel: "",
       priceIndex: 1,
+      priceLabel: "",
       ticketNum: 1,
       openTime: "",
       preheatSeconds: 30,
@@ -135,6 +156,46 @@ export function TaskForm({
     );
   };
 
+  const [sheet, setSheet] = useState<PurchaseSheetOptions | null>(null);
+  const [sheetError, setSheetError] = useState<string | null>(null);
+  const [readingSheet, setReadingSheet] = useState(false);
+  const deviceId = form.watch("deviceId");
+  const itemId = form.watch("itemId");
+
+  useEffect(() => {
+    setSheet(null);
+    setSheetError(null);
+    form.setValue("sessionLabel", "");
+    form.setValue("priceLabel", "");
+    // 只在设备或演出变化时丢掉已读列表。setValue 不该触发这次清理。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceId, itemId]);
+
+  const readSheet = async () => {
+    setReadingSheet(true);
+    setSheetError(null);
+    try {
+      const result = await readPurchaseSheet({ deviceId, itemId });
+      if (result.serverError) {
+        setSheet(null);
+        form.setValue("sessionLabel", "");
+        form.setValue("priceLabel", "");
+        setSheetError(result.serverError);
+        return;
+      }
+      if (!result.data) {
+        setSheet(null);
+        setSheetError("没有读到场次或票档");
+        return;
+      }
+      form.setValue("sessionLabel", result.data.sessions[0]?.label ?? "");
+      form.setValue("priceLabel", result.data.prices[0]?.label ?? "");
+      setSheet(result.data);
+    } finally {
+      setReadingSheet(false);
+    }
+  };
+
   const labelCls = "block text-xs font-medium text-muted";
 
   return (
@@ -173,15 +234,91 @@ export function TaskForm({
           />
         </div>
 
-        <div>
-          <label className={labelCls}>票档序号 (1-based)</label>
-          <Input
-            type="number"
-            min={1}
-            {...form.register("priceIndex", { valueAsNumber: true })}
-            className="mt-1 font-mono text-xs"
-          />
+        <div className="sm:col-span-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={readingSheet || deviceId.trim() === "" || itemId.trim() === ""}
+            onClick={() => void readSheet()}
+          >
+            {readingSheet ? "正在读取…" : "读取场次与票档"}
+          </Button>
+          {sheetError ? <p className="mt-1 text-xs text-danger">{sheetError}</p> : null}
         </div>
+
+        {sheet ? (
+          <>
+            <div>
+              <label className={labelCls}>场次</label>
+              {sheet.sessions.length > 0 ? (
+                <Controller
+                  control={form.control}
+                  name="sessionLabel"
+                  render={({ field }) => (
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <SelectTrigger className="mt-1 w-full">
+                        <SelectValue placeholder="选择场次" />
+                      </SelectTrigger>
+                      <SelectContent position="popper">
+                        {sheet.sessions.map((session) => (
+                          <SelectItem key={session.label} value={session.label}>
+                            {session.picked ? `${session.label}（已选）` : session.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                />
+              ) : (
+                <p className="mt-1 text-[11px] text-muted">没有场次卡片，将使用当前已选中的场次。</p>
+              )}
+            </div>
+            <div>
+              <label className={labelCls}>票档</label>
+              <Controller
+                control={form.control}
+                name="priceLabel"
+                render={({ field }) => (
+                  <Select value={field.value} onValueChange={field.onChange}>
+                    <SelectTrigger className="mt-1 w-full">
+                      <SelectValue placeholder="选择票档" />
+                    </SelectTrigger>
+                    <SelectContent position="popper">
+                      {sheet.prices.map((price) => (
+                        <SelectItem key={price.label} value={price.label}>
+                          {priceOptionLabel(price)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+              />
+            </div>
+          </>
+        ) : (
+          <>
+            <div>
+              <label className={labelCls}>场次序号 (1-based)</label>
+              <Input
+                type="number"
+                min={1}
+                max={20}
+                {...form.register("sessionIndex", { valueAsNumber: true })}
+                className="mt-1 font-mono text-xs"
+              />
+            </div>
+            <div>
+              <label className={labelCls}>票档序号 (1-based)</label>
+              <Input
+                type="number"
+                min={1}
+                {...form.register("priceIndex", { valueAsNumber: true })}
+                className="mt-1 font-mono text-xs"
+              />
+            </div>
+          </>
+        )}
 
         <div>
           <label className={labelCls}>购票张数</label>

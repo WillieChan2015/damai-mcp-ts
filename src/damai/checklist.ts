@@ -785,8 +785,14 @@ export async function waitForSaleStart(
 export interface RunChecklistOptions {
   /** 开票时间 'YYYY-MM-DD HH:MM:SS'；空串表示「立即抢」。 */
   openTime?: string;
-  /** 要选的票档序号（1-based）。 */
+  /** 要选的场次序号（1-based）。`sessionLabel` 非空时忽略。 */
+  sessionIndex?: number;
+  /** 场次卡片全文。空串表示改用序号。 */
+  sessionLabel?: string;
+  /** 要选的票档序号（1-based）。`priceLabel` 非空时忽略。 */
   priceIndex?: number;
+  /** 票档卡片全文。空串表示改用序号。 */
+  priceLabel?: string;
   /** 观演人姓名列表（大麦实名制）。 */
   viewerNames?: string[] | null;
   /** 购票张数。 */
@@ -838,7 +844,10 @@ export async function runChecklist(
   itemId: string,
   {
     openTime = "",
+    sessionIndex = 1,
+    sessionLabel = "",
     priceIndex = 1,
+    priceLabel = "",
     viewerNames = null,
     ticketNum = 1,
     preheatSeconds = DEFAULT_PREHEAT_SECONDS,
@@ -932,6 +941,9 @@ export async function runChecklist(
   const grabOptions: DamaiGrabOptions = {
     preheatSeconds: 0.0, // checklist 已预热
     maxRuntimeSec: 60.0, // 短窗口 —— 已预热（超限硬停止，报「已达最大运行时长」）
+    sessionIndex,
+    sessionLabel,
+    priceLabel,
   };
 
   if (targetUnix !== null && preheatSeconds > 0) {

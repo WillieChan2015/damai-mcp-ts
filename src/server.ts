@@ -34,6 +34,7 @@ import {
   damaiOpenConcert,
   damaiPay,
   damaiSelectPrice,
+  damaiSelectSession,
   damaiSelectViewers,
 } from "./damai/actions";
 import { runChecklist } from "./damai/checklist";
@@ -601,21 +602,59 @@ export function createMcpServer(): McpServer {
     "damai_select_price",
     {
       description:
-        "选择第 N 档票（从详情页的票价表）。\n\n" +
+        "选择票档。price_label 非空时按卡片全文点（如「内场988元」）；\n" +
+        "否则用 1-based 的 price_index。底部合计 ¥0 不算票档。\n\n" +
         "Args:\n" +
         "    device_id: 设备 ID。\n" +
-        "    price_index: 1-based 票档序号。\n" +
+        "    price_index: 1-based 票档序号。price_label 非空时忽略。\n" +
+        "    price_label: 票档卡片全文。空串表示改用序号。\n" +
         "    timeout: 等待秒数。",
       inputSchema: {
         device_id: z.string(),
         price_index: z.number().int().default(1),
+        price_label: z.string().default(""),
         timeout: z.number().default(4.0),
       },
       outputSchema: DICT_OUTPUT,
     },
-    async ({ device_id, price_index, timeout }) => {
-      const el = await damaiSelectPrice(device_id, price_index, { timeout });
+    async ({ device_id, price_index, price_label, timeout }) => {
+      const el = await damaiSelectPrice(device_id, price_index, {
+        timeout,
+        priceLabel: price_label,
+      });
       return dictResult({ selected_price_text: el.text, center: [...el.center] });
+    },
+  );
+
+  mcp.registerTool(
+    "damai_select_session",
+    {
+      description:
+        "选择场次。session_label 非空时按日期卡片全文点；\n" +
+        "否则用 1-based 的 session_index。没有场次卡片且序号为 1 时不点击。\n\n" +
+        "Args:\n" +
+        "    device_id: 设备 ID。\n" +
+        "    session_index: 1-based 场次序号。session_label 非空时忽略。\n" +
+        "    session_label: 场次卡片全文。空串表示改用序号。\n" +
+        "    timeout: 等待秒数。",
+      inputSchema: {
+        device_id: z.string(),
+        session_index: z.number().int().default(1),
+        session_label: z.string().default(""),
+        timeout: z.number().default(4.0),
+      },
+      outputSchema: DICT_OUTPUT,
+    },
+    async ({ device_id, session_index, session_label, timeout }) => {
+      const el = await damaiSelectSession(device_id, session_index, {
+        timeout,
+        sessionLabel: session_label,
+      });
+      return dictResult(
+        el === null
+          ? { skipped: true }
+          : { skipped: false, selected_session_text: el.text, center: [...el.center] },
+      );
     },
   );
 
@@ -693,7 +732,10 @@ export function createMcpServer(): McpServer {
         "Args:\n" +
         "    device_id: 设备 ID。\n" +
         "    item_id: 大麦 item id。\n" +
-        "    price_index: 票档序号（1-based）。\n" +
+        "    session_index: 场次序号（1-based）。session_label 非空时忽略。\n" +
+        "    session_label: 场次卡片全文。空串表示改用序号。\n" +
+        "    price_index: 票档序号（1-based）。price_label 非空时忽略。\n" +
+        "    price_label: 票档卡片全文。空串表示改用序号。\n" +
         "    viewer_names: 观演人姓名列表。\n" +
         "    ticket_num: 张数。\n" +
         '    open_time: 开票时间 "YYYY-MM-DD HH:MM:SS"（空=立即抢）。\n' +
@@ -714,7 +756,10 @@ export function createMcpServer(): McpServer {
       inputSchema: {
         device_id: z.string(),
         item_id: z.string(),
+        session_index: z.number().int().default(1),
+        session_label: z.string().default(""),
         price_index: z.number().int().default(1),
+        price_label: z.string().default(""),
         viewer_names: z.array(z.string()).nullable().default(null),
         ticket_num: z.number().int().default(1),
         open_time: z.string().default(""),
@@ -731,7 +776,10 @@ export function createMcpServer(): McpServer {
     async ({
       device_id,
       item_id,
+      session_index,
+      session_label,
       price_index,
+      price_label,
       viewer_names,
       ticket_num,
       open_time,
@@ -756,6 +804,9 @@ export function createMcpServer(): McpServer {
             maxGrabAttempts: max_grab_attempts,
             retryIntervalMs: retry_interval_ms,
             confirmOrder: confirm_order,
+            sessionIndex: session_index,
+            sessionLabel: session_label,
+            priceLabel: price_label,
           },
         ),
       );
@@ -773,7 +824,10 @@ export function createMcpServer(): McpServer {
         '        "max_grab_attempts": 3}, ...]（account 内可选键 max_grab_attempts\n' +
         "        = 该账号的可重试失败最大尝试轮数，默认 1=不重试）。\n" +
         "    item_id: 大麦 item id。\n" +
-        "    price_index: 票档序号。\n" +
+        "    session_index: 场次序号（1-based）。session_label 非空时忽略。\n" +
+        "    session_label: 场次卡片全文。空串表示改用序号。\n" +
+        "    price_index: 票档序号。price_label 非空时忽略。\n" +
+        "    price_label: 票档卡片全文。空串表示改用序号。\n" +
         "    open_time: 开票时间。\n" +
         "    preheat_seconds: 预热秒数。\n\n" +
         "同一设备同时只允许一个监控/抢票任务：accounts 中重复的 device_id\n" +
@@ -781,13 +835,25 @@ export function createMcpServer(): McpServer {
       inputSchema: {
         accounts: z.array(z.record(z.unknown())),
         item_id: z.string(),
+        session_index: z.number().int().default(1),
+        session_label: z.string().default(""),
         price_index: z.number().int().default(1),
+        price_label: z.string().default(""),
         open_time: z.string().default(""),
         preheat_seconds: z.number().default(30.0),
       },
       outputSchema: DICT_OUTPUT,
     },
-    async ({ accounts, item_id, price_index, open_time, preheat_seconds }) => {
+    async ({
+      accounts,
+      item_id,
+      session_index,
+      session_label,
+      price_index,
+      price_label,
+      open_time,
+      preheat_seconds,
+    }) => {
       // Python 推导式在 gather 之前就求值每个 _damai_grab(...) 调用的实参，
       // 缺 device_id 的 KeyError 会先于 gather 抛出——此处保持同一语义
       const tasks = accounts.map((a) => {
@@ -813,7 +879,13 @@ export function createMcpServer(): McpServer {
               (a["viewer_names"] ?? []) as string[],
               (a["ticket_num"] ?? 1) as number,
               open_time,
-              { preheatSeconds: preheat_seconds, maxGrabAttempts },
+              {
+                preheatSeconds: preheat_seconds,
+                maxGrabAttempts,
+                sessionIndex: session_index,
+                sessionLabel: session_label,
+                priceLabel: price_label,
+              },
             ),
         );
       });
@@ -887,7 +959,10 @@ export function createMcpServer(): McpServer {
         "    device_id: 设备 ID。\n" +
         "    item_id: 大麦 item id。\n" +
         "    open_time: 开票时间 'YYYY-MM-DD HH:MM:SS'（空=立即抢）。\n" +
-        "    price_index: 票档序号（1-based）。\n" +
+        "    session_index: 场次序号（1-based）。session_label 非空时忽略。\n" +
+        "    session_label: 场次卡片全文。空串表示改用序号。\n" +
+        "    price_index: 票档序号（1-based）。price_label 非空时忽略。\n" +
+        "    price_label: 票档卡片全文。空串表示改用序号。\n" +
         "    viewer_names: 观演人姓名列表。\n" +
         "    ticket_num: 张数。\n" +
         "    preheat_seconds: 开票前多少秒开始预热（默认 30）。\n" +
@@ -897,7 +972,10 @@ export function createMcpServer(): McpServer {
         device_id: z.string(),
         item_id: z.string(),
         open_time: z.string().default(""),
+        session_index: z.number().int().default(1),
+        session_label: z.string().default(""),
         price_index: z.number().int().default(1),
+        price_label: z.string().default(""),
         viewer_names: z.array(z.string()).nullable().default(null),
         ticket_num: z.number().int().default(1),
         preheat_seconds: z.number().default(30.0),
@@ -909,7 +987,10 @@ export function createMcpServer(): McpServer {
       device_id,
       item_id,
       open_time,
+      session_index,
+      session_label,
       price_index,
+      price_label,
       viewer_names,
       ticket_num,
       preheat_seconds,
@@ -931,7 +1012,10 @@ export function createMcpServer(): McpServer {
       const res = await withDeviceLease(device_id, "checklist_grab", () =>
         runChecklist(device_id, item_id, {
           openTime: open_time,
+          sessionIndex: session_index,
+          sessionLabel: session_label,
           priceIndex: price_index,
+          priceLabel: price_label,
           viewerNames: viewer_names ?? [],
           ticketNum: ticket_num,
           preheatSeconds: preheat_seconds,
@@ -1153,6 +1237,9 @@ export function createMcpServer(): McpServer {
           {
             preheatSeconds: pyFloatCast(opts["preheat_seconds"] ?? 0.0),
             maxRuntimeSec: pyFloatCast(opts["max_runtime_sec"] ?? 60.0),
+            sessionIndex: pyIntCast(opts["session_index"] ?? 1),
+            sessionLabel: opts["session_label"] === undefined ? "" : String(opts["session_label"]),
+            priceLabel: opts["price_label"] === undefined ? "" : String(opts["price_label"]),
           },
         );
         return dictResult({
