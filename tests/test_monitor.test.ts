@@ -95,6 +95,22 @@ describe("classifyAvailability 纯函数矩阵", () => {
     expect(classifyAvailability(nodes, { priceLabels: ["看台488元"] }).status).toBe("sold_out");
   });
 
+  it("同节点缺货登记后缀：按档判 sold_out，且不污染整页词表误伤其他档", () => {
+    // 角标与正文同节点（"看台588元缺货登记"）——旧实现 pageElementsOutsidePriceCards
+    // 按全文排除，该卡片的「缺货」字样会被整页售罄词表误判成场次级终局
+    const nodes = [
+      el({ text: "票档", bounds: [16, 400, 80, 430] }),
+      el({ text: "看台588元缺货登记", bounds: [16, 450, 200, 510] }),
+      el({ text: "看台688元", bounds: [16, 530, 180, 590] }),
+      el({ text: "立即购买", bounds: [16, 700, 200, 760] }),
+      el({ text: "确定", bounds: [250, 740, 380, 790] }),
+    ];
+    expect(classifyAvailability(nodes, { priceLabels: ["看台588元"] }).status).toBe("sold_out");
+    expect(
+      classifyAvailability(nodes, { priceLabels: ["看台688元"] }),
+    ).toEqual({ status: "available", reason: "看台688元" });
+  });
+
   it("立即购买 → available（正证据 CTA）", () => {
     expect(classifyAvailability([el({ text: "立即购买" })])).toEqual({
       status: "available",

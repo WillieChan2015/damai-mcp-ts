@@ -15,10 +15,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   DAMAI_ORDERS_URL,
+  DAMAI_SKU_ACTIVITY_MARKER,
   NEEDS_ACTION_MESSAGE,
   classifyGrabBlocker,
   damaiGrab,
   damaiLoginCheck,
+  damaiOpenConcert,
   damaiSelectPrice,
   damaiSelectPriceByPriority,
   damaiSelectSession,
@@ -44,6 +46,7 @@ const {
   screenshotMock,
   waitMsMock,
   mkdirSyncMock,
+  recognizeTextBoxesMock,
 } = vi.hoisted(() => ({
   /** `device/adb.shell` 桩（覆盖 `_is_damai_foreground` 的 dumpsys 查询与登录检查的窗口查询）。 */
   shellMock: vi.fn<(...args: unknown[]) => Promise<string>>(),
@@ -61,6 +64,10 @@ const {
   waitMsMock: vi.fn<(...args: unknown[]) => Promise<void>>(),
   /** `node:fs.mkdirSync` 桩（对应 Python 把 `_shots_dir` 重定向到 tmp_path）。 */
   mkdirSyncMock: vi.fn<(...args: unknown[]) => void>(),
+  /** `inspector/visionOcr.recognizeTextBoxes` 桩（修复 4c：CTA OCR 读数）。 */
+  recognizeTextBoxesMock: vi.fn<
+    (...args: unknown[]) => Promise<Array<{ bounds: [number, number, number, number]; text: string }>>
+  >(),
 }));
 
 vi.mock("../src/device/adb", async (importOriginal) => {
@@ -78,6 +85,10 @@ vi.mock("../src/inspector/dump", async (importOriginal) => {
 vi.mock("../src/actions/actions", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/actions/actions")>();
   return { ...actual, tap: tapMock, screenshot: screenshotMock, waitMs: waitMsMock };
+});
+vi.mock("../src/inspector/visionOcr", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/inspector/visionOcr")>();
+  return { ...actual, recognizeTextBoxes: recognizeTextBoxesMock };
 });
 // 对应 Python 测试把 `_shots_dir` 补丁到 pytest 的 tmp_path：阻止 shotsDir()
 // 在仓库里真实创建 damai_shots/ 目录（screenshot 本身已被 mock，不写文件）。
@@ -1178,5 +1189,248 @@ describe("购买弹层场次与票档", () => {
     const price = await damaiSelectPrice("device", 1, { priceLabel: "内场1880元" });
     expect(price.text).toBe("内场1880元");
     expect(tapMock).not.toHaveBeenCalled();
+  });
+});
+
+// ---- 同节点角标（修复 4a）：角标拼在卡片正文行尾的形态 -----------------------
+
+/** 角标与正文同节点的弹层：588 档带「缺货登记」行尾后缀，688 正常。 */
+function sameNodeBadgeSheet(): UIElement[] {
+  return [
+    sheetNode("场次", [16, 180, 80, 210]),
+    sheetNode("2026-10-18 周日 18:30预售", [16, 240, 360, 300]),
+    sheetNode("票档", [16, 400, 80, 430]),
+    sheetNode("看台588元缺货登记", [16, 450, 200, 510]),
+    sheetNode("看台688元", [16, 530, 180, 590]),
+    sheetNode("¥0", [16, 750, 80, 790]),
+    sheetNode("确定", [250, 740, 380, 790]),
+  ];
+}
+
+describe("同节点角标的选档语义（修复 4a）", () => {
+  it("票档文字按归一化比对命中（旧实现全文精确匹配会误报未找到）", async () => {
+    dumpUiMock.mockResolvedValue(sameNodeBadgeSheet());
+    waitMsMock.mockResolvedValue(undefined);
+    tapMock.mockResolvedValue(undefined);
+
+    const price = await damaiSelectPrice("device", 1, { priceLabel: "看台688元" });
+    expect(price.text).toBe("看台688元");
+    expect(tapMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("缺货登记档：匹配到也拒绝点击（点击会进入登记流程而非购票）", async () => {
+    dumpUiMock.mockResolvedValue(sameNodeBadgeSheet());
+    waitMsMock.mockResolvedValue(undefined);
+
+    await expect(damaiSelectPrice("device", 1, { priceLabel: "看台588元" })).rejects.toThrow(
+      "缺货",
+    );
+    expect(tapMock).not.toHaveBeenCalled();
+  });
+
+  it("序号路径命中缺货登记档同样拒绝点击", async () => {
+    dumpUiMock.mockResolvedValue(sameNodeBadgeSheet());
+    waitMsMock.mockResolvedValue(undefined);
+
+    await expect(damaiSelectPrice("device", 1)).rejects.toThrow("未点击");
+    expect(tapMock).not.toHaveBeenCalled();
+  });
+
+  it("ByPriority：同节点缺货主档自动落到备选", async () => {
+    dumpUiMock.mockResolvedValue(sameNodeBadgeSheet());
+    waitMsMock.mockResolvedValue(undefined);
+    tapMock.mockResolvedValue(undefined);
+
+    const price = await damaiSelectPriceByPriority("device", 1, {
+      priceLabel: "看台588元",
+      priceFallbacks: ["看台688元"],
+    });
+    expect(price.text).toBe("看台688元");
+    expect(tapMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("ByPriority：同节点缺货且无备选 → 备选档位均已缺货", async () => {
+    dumpUiMock.mockResolvedValue(sameNodeBadgeSheet());
+    await expect(
+      damaiSelectPriceByPriority("device", 1, { priceLabel: "看台588元" }),
+    ).rejects.toThrow(/备选档位均已缺货/);
+    expect(tapMock).not.toHaveBeenCalled();
+  });
+
+  it("场次卡片带预售后缀也能按归一化文字选中", async () => {
+    dumpUiMock.mockResolvedValue(sameNodeBadgeSheet());
+    waitMsMock.mockResolvedValue(undefined);
+    tapMock.mockResolvedValue(undefined);
+
+    const session = await damaiSelectSession("device", 1, {
+      sessionLabel: "2026-10-18 周日 18:30",
+    });
+    expect(session?.text).toBe("2026-10-18 周日 18:30预售");
+    expect(tapMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---- 详情页入口探测与 OCR 兜底（修复 4c）---------------------------------------
+//
+// 本机实测事实（小米 M2102K1AC / 大麦当前版本）：
+// - 底部 CTA 整个子树不进无障碍树，文本与容器 rid 稳定缺失；
+// - 预售态 CTA 视觉文案为「立即预订」；
+// - 弹层是独立 Activity（NcovSkuActivity），无深链 filter，只能点击进入；
+// - ProjectDetailActivity 的深链 authority 是 detail / projectdetail / trade/detail。
+
+/** 最小 PNG：只写 IHDR 头（readBottomCta 用它取屏幕宽高做底部带过滤）。 */
+function fakePng(w = 1080, h = 2400): Buffer {
+  const buf = Buffer.alloc(24);
+  buf.writeUInt32BE(0x89504e47, 0);
+  buf.writeUInt32BE(0x0d0a1a0a, 4);
+  buf.writeUInt32BE(w, 16);
+  buf.writeUInt32BE(h, 20);
+  return buf;
+}
+
+/** 通用桩：大麦在前台、登录正常、无 SKU 弹层 Activity、OCR 无信号。 */
+function stubForeground(): void {
+  shellMock.mockImplementation(async (...args: unknown[]) => {
+    const argv = shellArgv(args);
+    if (argv[0] === "dumpsys" && argv[1] === "activity") {
+      return "… cn.damai …（前台）";
+    }
+    return "";
+  });
+  assertTextMock.mockResolvedValue(false);
+  tapMock.mockResolvedValue(undefined);
+  screenshotMock.mockResolvedValue(fakePng());
+  waitMsMock.mockResolvedValue(undefined);
+  mkdirSyncMock.mockReturnValue(undefined);
+  recognizeTextBoxesMock.mockResolvedValue([]);
+}
+
+describe("damai_open_concert 入口探测（修复 4c）", () => {
+  beforeEach(() => {
+    stubForeground();
+  });
+
+  it("深链优先 damai://detail，CTA 文案命中 → loaded=true state=buyable", async () => {
+    waitForElementMock.mockResolvedValue(
+      new UIElement({ tag: "node", text: "立即购买", bounds: [0, 0, 10, 10] }),
+    );
+    const res = await damaiOpenConcert("device", "1082041144079");
+    expect(res.loaded).toBe(true);
+    expect(res.state).toBe("buyable");
+    expect(res.evidence).toBe("立即购买");
+    const amCalls = shellMock.mock.calls.map(shellArgv).filter((argv) => argv[0] === "am");
+    expect(amCalls).toHaveLength(1);
+    const data = amCalls[0]![amCalls[0]!.indexOf("-d") + 1];
+    expect(data).toBe("damai://detail?id=1082041144079");
+  });
+
+  it("「立即购买」缺失时尝试「立即预订」变体（预售态 CTA）", async () => {
+    waitForElementMock.mockImplementation(async (...args: unknown[]) => {
+      if ((args[1] as string) === "text=立即购买") {
+        throw new UIElementNotFoundError("模拟：未找到 立即购买");
+      }
+      return new UIElement({ tag: "node", text: "立即预订", bounds: [0, 0, 10, 10] });
+    });
+    const res = await damaiOpenConcert("device", "item");
+    expect(res.state).toBe("buyable");
+    expect(res.evidence).toBe("立即预订");
+  });
+
+  it("文本变体全缺、弹层已渲染 → state=sheet_open（不再误报加载失败）", async () => {
+    waitForElementMock.mockRejectedValue(new UIElementNotFoundError("模拟：全缺"));
+    dumpUiMock.mockResolvedValue(screenshotSheet());
+    const res = await damaiOpenConcert("device", "item");
+    expect(res.loaded).toBe(true);
+    expect(res.state).toBe("sheet_open");
+  });
+
+  it("a11y 全盲且弹层不在 → loaded=false state=unknown（保持失败语义）", async () => {
+    waitForElementMock.mockRejectedValue(new UIElementNotFoundError("模拟：全缺"));
+    dumpUiMock.mockResolvedValue([]);
+    const res = await damaiOpenConcert("device", "item");
+    expect(res.loaded).toBe(false);
+    expect(res.state).toBe("unknown");
+  });
+});
+
+describe("damai_grab 第 6 步入口兜底（修复 4c）", () => {
+  beforeEach(() => {
+    stubForeground();
+  });
+
+  it("弹层已在前台（NcovSkuActivity）→ 第 6 步跳过点购买，直接选人", async () => {
+    shellMock.mockImplementation(async (...args: unknown[]) => {
+      const argv = shellArgv(args);
+      if (argv[0] === "dumpsys" && argv[1] === "activity") {
+        return "cn.damai 前台";
+      }
+      if (argv[0] === "dumpsys" && argv[1] === "window") {
+        return `mCurrentFocus=cn.damai/${DAMAI_SKU_ACTIVITY_MARKER}`;
+      }
+      return "";
+    });
+    waitForElementMock.mockResolvedValue(
+      new UIElement({ tag: "node", text: "立即购买", bounds: [0, 0, 10, 10] }),
+    );
+    dumpUiMock.mockResolvedValue([
+      new UIElement({ tag: "node", text: "¥680", bounds: [0, 100, 200, 160] }),
+      new UIElement({ tag: "node", text: "viewer", bounds: [0, 300, 200, 360] }),
+    ]);
+    const result = await damaiGrab("device", "item", 1, ["viewer"]);
+    expect(result.status).toBe("ready_for_human");
+    // waitForElement 只有第 2 步的变体探测（第 6 步被弹层检测短路）
+    expect(waitForElementMock).toHaveBeenCalledTimes(1);
+    // 第一次 tap 是票档 ¥680 (100,130)（第 7 步选档），绝不是购买按钮 (5,5)
+    expect(tapMock.mock.calls[0]).toEqual(["device", 100, 130]);
+  });
+
+  it("文本变体全缺、OCR 读到「立即预订」→ 坐标点击打开弹层", async () => {
+    waitForElementMock.mockRejectedValue(new UIElementNotFoundError("模拟：全缺"));
+    dumpUiMock.mockResolvedValue(screenshotSheet());
+    recognizeTextBoxesMock.mockResolvedValue([{ bounds: [200, 2250, 880, 2330], text: "立即预订" }]);
+    // priceIndex=3 → 看台688元（截图布局里第一张未缺货卡片）
+    const result = await damaiGrab("device", "item", 3, null);
+    expect(result.status).toBe("ready_for_human");
+    expect(tapMock.mock.calls[0]).toEqual(["device", 540, 2290]);
+  });
+
+  it("OCR 读到不可购 CTA（预约）→ 报错带明确文案，绝不点击", async () => {
+    waitForElementMock.mockRejectedValue(new UIElementNotFoundError("模拟：全缺"));
+    // 第 2 步的弹层判定用带角标的弹层；重试泵的失败分类换干净页面，
+    // 避免「缺货登记」角标抢先把失败归类成 sold_out
+    dumpUiMock.mockResolvedValueOnce(screenshotSheet()).mockResolvedValue([
+      new UIElement({ tag: "node", text: "演出详情", bounds: [0, 0, 100, 40] }),
+    ]);
+    recognizeTextBoxesMock.mockResolvedValue([{ bounds: [200, 2250, 880, 2330], text: "预约" }]);
+    const result = await damaiGrab("device", "item", 3, null);
+    expect(result.status).toBe("failed");
+    expect(result.error ?? "").toContain("详情页 CTA 为「预约」");
+    expect(tapMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("damai_open_concert OCR 兜底（修复 4c 补丁）", () => {
+  beforeEach(() => {
+    stubForeground();
+  });
+
+  it("a11y 全盲、OCR 读到「立即预订」→ loaded=true state=buyable", async () => {
+    waitForElementMock.mockRejectedValue(new UIElementNotFoundError("模拟：全缺"));
+    dumpUiMock.mockResolvedValue([]);
+    recognizeTextBoxesMock.mockResolvedValue([{ bounds: [228, 2193, 1048, 2358], text: "立即预订" }]);
+    const res = await damaiOpenConcert("device", "item");
+    expect(res.loaded).toBe(true);
+    expect(res.state).toBe("buyable");
+    expect(res.evidence).toBe("立即预订（OCR）");
+  });
+
+  it("OCR 读到不可购 CTA → loaded=false，evidence 带可见文案", async () => {
+    waitForElementMock.mockRejectedValue(new UIElementNotFoundError("模拟：全缺"));
+    dumpUiMock.mockResolvedValue([]);
+    recognizeTextBoxesMock.mockResolvedValue([{ bounds: [228, 2193, 1048, 2358], text: "预约" }]);
+    const res = await damaiOpenConcert("device", "item");
+    expect(res.loaded).toBe(false);
+    expect(res.state).toBe("unknown");
+    expect(res.evidence).toBe("CTA 为「预约」，当前不可购");
   });
 });

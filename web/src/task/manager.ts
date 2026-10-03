@@ -364,8 +364,15 @@ export class TaskManager {
         if (entry.stopEvent.isSet()) {
           this.pushProgress(entry, "确认点击已发出，请到订单页核对");
         }
+      } else if (entry.stopEvent.isSet()) {
+        entry.status = "cancelled";
+      } else if (outcomeIsFailed(value)) {
+        // runner 正常返回但业务终态是失败（checklist/damaiGrab 的 failed、
+        // needs_human_captcha）——如实标 failed，不再一律标 succeeded。
+        entry.status = "failed";
+        entry.error = outcomeErrorOf(value);
       } else {
-        entry.status = entry.stopEvent.isSet() ? "cancelled" : "succeeded";
+        entry.status = "succeeded";
       }
     } catch (exc) {
       entry.error = exc instanceof Error ? exc.message : String(exc);
@@ -510,6 +517,47 @@ function orderAlreadyCommitted(value: unknown): boolean {
   return [record.status, record.grab_result?.status].some(
     (status) => status === "needs_action" || status === "submitted",
   );
+}
+
+/** 抢票/checklist 形态返回值（ChecklistResultDict / GrabResult）的顶层业务终态；
+ * monitor 与 custom 任务的返回值没有顶层 status 字段，返回 null。 */
+function outcomeStatusOf(value: unknown): string | null {
+  if (value === null || typeof value !== "object") {
+    return null;
+  }
+  const status = (value as { status?: unknown }).status;
+  return typeof status === "string" ? status : null;
+}
+
+/** 业务终态映射为 failed 的状态集合：runner 正常返回但目标未达成（滑块拦截
+ * 与显式 failed）。ready_for_human / submitted / needs_action 属正常达成或交接。 */
+const FAILED_OUTCOME_STATUSES: ReadonlySet<string> = new Set([
+  "failed",
+  "needs_human_captcha",
+]);
+
+/** 业务终态是否为失败（见 {@link FAILED_OUTCOME_STATUSES}）。 */
+function outcomeIsFailed(value: unknown): boolean {
+  const status = outcomeStatusOf(value);
+  return status !== null && FAILED_OUTCOME_STATUSES.has(status);
+}
+
+/** 失败终态的原因文案：优先 checklist 顶层 error，缺省回落 grab_result.error。 */
+function outcomeErrorOf(value: unknown): string | null {
+  if (value === null || typeof value !== "object") {
+    return null;
+  }
+  const record = value as { error?: unknown; grab_result?: unknown };
+  if (typeof record.error === "string" && record.error !== "") {
+    return record.error;
+  }
+  if (record.grab_result !== null && typeof record.grab_result === "object") {
+    const grabError = (record.grab_result as { error?: unknown }).error;
+    if (typeof grabError === "string" && grabError !== "") {
+      return grabError;
+    }
+  }
+  return null;
 }
 
 const SINGLETON_KEY = "__damaiWebTaskManager";

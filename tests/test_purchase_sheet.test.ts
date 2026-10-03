@@ -5,6 +5,7 @@ import { parseOcrOutput } from "../src/inspector/visionOcr";
 import {
   applyOcrLabels,
   labelFromOcrLines,
+  normalizeSheetLabel,
   parsePurchaseSheet,
   sessionCardsAwaitingPrices,
   type OcrBox,
@@ -124,5 +125,34 @@ describe("applyOcrLabels", () => {
       "内场2380元",
     ]);
     expect(sheet.prices[4]?.picked).toBe(true);
+  });
+});
+
+describe("normalizeSheetLabel 与同节点角标", () => {
+  it("剥行尾角标（缺货登记 / 可预约 / 预售），正文原样保留", () => {
+    expect(normalizeSheetLabel("看台588元缺货登记")).toBe("看台588元");
+    expect(normalizeSheetLabel("看台588元 缺货登记")).toBe("看台588元");
+    expect(normalizeSheetLabel("看台580元（大屏观演区，仅支持看大屏）可预约")).toBe(
+      "看台580元（大屏观演区，仅支持看大屏）",
+    );
+    expect(normalizeSheetLabel("2026-10-18 周日 18:30预售")).toBe("2026-10-18 周日 18:30");
+    expect(normalizeSheetLabel("看台688元")).toBe("看台688元");
+  });
+
+  it("角标与正文同节点：label 归一化、该档 soldOut=true，无需独立角标节点", () => {
+    const sheet = parsePurchaseSheet([
+      node("场次", [16, 180, 80, 210]),
+      node("2026-10-18 周日 18:30", [16, 240, 360, 300]),
+      node("票档", [16, 400, 80, 430]),
+      node("看台588元缺货登记", [16, 450, 200, 510]),
+      node("看台688元", [16, 530, 180, 590]),
+      node("¥0", [16, 750, 80, 790]),
+      node("确定", [250, 740, 380, 790]),
+    ]);
+    expect(sheet.prices.map((price) => [price.label, price.soldOut])).toEqual([
+      ["看台588元", true],
+      ["看台688元", false],
+    ]);
+    expect(sheet.sessions.map((session) => session.label)).toEqual(["2026-10-18 周日 18:30"]);
   });
 });

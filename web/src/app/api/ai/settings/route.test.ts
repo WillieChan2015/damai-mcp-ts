@@ -1,11 +1,14 @@
 /**
  * /api/ai/settings 路由测试（设计 §8.6④）：GET 掩码状态形状 / POST 合法保存
- * （落盘 0600）/ POST 非法 body 400 中文。配置经 DAMAI_WEB_DATA_DIR（空临时
- * 目录）+ DAMAI_AI_* env 直灌，隔离本机 web/data/ai-settings.json。
+ * （落任务库）/ POST 非法 body 400 中文。配置经 DAMAI_WEB_TASK_DB（临时目录）
+ * + DAMAI_WEB_DATA_DIR（同目录，隔离本机遗留 ai-settings.json）+ DAMAI_AI_*
+ * env 直灌，隔离本机 web/data/tasks.db。
  */
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import Database from "better-sqlite3";
 
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -13,6 +16,7 @@ import { GET, POST } from "./route";
 
 /** 本机真实 env 的原值（afterAll 复位）。 */
 const ENV_KEYS = [
+  "DAMAI_WEB_TASK_DB",
   "DAMAI_WEB_DATA_DIR",
   "DAMAI_AI_BASE_URL",
   "DAMAI_AI_API_KEY",
@@ -31,8 +35,17 @@ const POST_MODEL = "post-model";
 
 let dataDir: string;
 
-function settingsFile(): string {
-  return join(dataDir, "ai-settings.json");
+/** 直读任务库中的 AI 设置单例行（验证真实落库内容）。 */
+function readDbRow(): Record<string, unknown> {
+  const db = new Database(join(dataDir, "tasks.db"), { readonly: true });
+  try {
+    return db.prepare("SELECT base_url, api_key, model FROM ai_settings WHERE id = 1").get() as Record<
+      string,
+      unknown
+    >;
+  } finally {
+    db.close();
+  }
 }
 
 function clearAiEnv(): void {
@@ -56,9 +69,11 @@ function postRequest(body: string): Request {
 }
 
 beforeEach(() => {
-  // 先清空再注入：clearAiEnv 会删掉 DAMAI_WEB_DATA_DIR，顺序不能反
+  // 先清空再注入：clearAiEnv 会删掉 DAMAI_WEB_* 两个变量，顺序不能反
   clearAiEnv();
   dataDir = mkdtempSync(join(tmpdir(), "ai-settings-route-test-"));
+  process.env.DAMAI_WEB_TASK_DB = join(dataDir, "tasks.db");
+  // 遗留迁移路径钉到临时目录，防止 GET/POST 触发迁移时碰本机真实遗留文件
   process.env.DAMAI_WEB_DATA_DIR = dataDir;
 });
 
@@ -90,7 +105,6 @@ describe("GET /api/ai/settings", () => {
       baseUrl: null,
       model: null,
       maskedKey: null,
-      filePresent: false,
     });
   });
 
@@ -112,7 +126,7 @@ describe("GET /api/ai/settings", () => {
 // ---- POST --------------------------------------------------------------------
 
 describe("POST /api/ai/settings", () => {
-  it("合法三要素 → 200 + 最新状态（source=file），文件落盘 0600 且内容正确", async () => {
+  it("合法三要素 → 200 + 最新状态（source=db），真实落库且内容与请求一致", async () => {
     const res = await POST(
       postRequest(
         JSON.stringify({ baseUrl: POST_BASE_URL, apiKey: POST_API_KEY, model: POST_MODEL }),
@@ -122,25 +136,21 @@ describe("POST /api/ai/settings", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.configured).toBe(true);
-    expect(body.source).toBe("file");
+    expect(body.source).toBe("db");
     expect(body.baseUrl).toBe(POST_BASE_URL);
     expect(body.maskedKey).not.toBe(POST_API_KEY);
 
-    // 文件真实落盘：权限 0600（POSIX）+ JSON 内容与请求一致
-    const text = readFileSync(settingsFile(), "utf-8");
-    expect(JSON.parse(text)).toEqual({
-      baseUrl: POST_BASE_URL,
-      apiKey: POST_API_KEY,
+    // 库中真实落库：单例行内容与请求一致
+    expect(readDbRow()).toEqual({
+      base_url: POST_BASE_URL,
+      api_key: POST_API_KEY,
       model: POST_MODEL,
     });
-    if (process.platform !== "win32") {
-      expect(statSync(settingsFile()).mode & 0o777).toBe(0o600);
-    }
     // 状态回包不含 apiKey 原文
     expect(JSON.stringify(body)).not.toContain(POST_API_KEY);
   });
 
-  it("baseUrl 非法 URL → 400 中文且不落盘", async () => {
+  it("baseUrl 非法 URL → 400 中文且不落库", async () => {
     const res = await POST(
       postRequest(JSON.stringify({ baseUrl: "not-a-url", apiKey: POST_API_KEY, model: POST_MODEL })),
     );
@@ -149,6 +159,7 @@ describe("POST /api/ai/settings", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("AI 设置校验失败");
     expect(body.error).toContain("Base URL");
+    expect(() => readDbRow()).toThrow();
   });
 
   it("缺 model → 400 逐字段中文点名", async () => {

@@ -24,7 +24,7 @@ import { shell } from "../device/adb";
 import { dumpUi } from "../inspector/dump";
 import type { UIElement } from "../inspector/models";
 import { DAMAI_PACKAGE } from "./actions";
-import { parsePurchaseSheet } from "./purchaseSheet";
+import { normalizeSheetLabel, parsePurchaseSheet } from "./purchaseSheet";
 import { logger } from "../utils/logging";
 
 // ---- 常量 ----------------------------------------------------------------------
@@ -375,7 +375,9 @@ function pageElementsOutsidePriceCards(elements: readonly UIElement[]): UIElemen
     if (text === "缺货登记") {
       return false;
     }
-    return !cards.has(text);
+    // 角标与正文同节点时（"看台588元缺货登记"），按归一化标签排除，
+    // 否则正文行尾的「缺货」字样会被整页词表误判成场次级售罄
+    return !cards.has(normalizeSheetLabel(text));
   });
 }
 

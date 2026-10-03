@@ -47,7 +47,7 @@ const AI_SYSTEM_PROMPT = [
 /** 未配置 provider 时的引导文案（中文、可操作，设计 §8.3 原文）。 */
 const GUIDE_MESSAGE =
   "尚未配置 AI 提供商：① 打开本页「设置」填入 Base URL / API Key / 模型名" +
-  "（保存到 web/data/ai-settings.json，权限 0600）；或 ② 在启动 web 前设置环境变量" +
+  "（保存到任务数据库 web/data/tasks.db）；或 ② 在启动 web 前设置环境变量" +
   " DAMAI_AI_BASE_URL / DAMAI_AI_API_KEY / DAMAI_AI_MODEL。";
 
 /** 对外错误文案（不含任何请求细节与密钥）。 */

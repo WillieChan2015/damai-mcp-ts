@@ -21,7 +21,7 @@ const labelCls = "block text-xs font-medium text-zinc-600 dark:text-zinc-400";
 
 /** 来源 → 中文标签。 */
 const SOURCE_LABEL: Record<AiSettingsStatus["source"], string> = {
-  file: "设置文件（web/data/ai-settings.json）",
+  db: "任务数据库（web/data/tasks.db）",
   env: "环境变量（DAMAI_AI_*）",
   none: "未配置",
 };
@@ -75,12 +75,11 @@ export function SettingsForm({ status }: { status: AiSettingsStatus }) {
         </span>
         <span className="text-xs text-muted">
           来源：{SOURCE_LABEL[status.source]}
-          {status.filePresent ? "；设置文件存在" : "；设置文件不存在"}
         </span>
       </div>
       <p className="mt-1 text-sm text-muted">
-        任意 OpenAI 兼容 API（Base URL 形如 https://host/v1）。保存写入
-        web/data/ai-settings.json（权限 0600，优先级高于环境变量）；API Key
+        任意 OpenAI 兼容 API（Base URL 形如 https://host/v1）。保存写入任务数据库
+        web/data/tasks.db 的 ai_settings 表（优先级高于环境变量）；API Key
         只存服务端，页面仅显示掩码{status.maskedKey !== null ? `（当前：${status.maskedKey}）` : ""}。
       </p>
 

@@ -63,12 +63,20 @@ describe("GET /screenshots/file/[name]", () => {
   });
 
   it("目录未就绪（env 指向不存在的目录且无回落候选可用）→ 404", async () => {
-    vi.stubEnv("DAMAI_WEB_SHOTS_DIR", path.join(shotsDir, "nope"));
-    const res = await GET(new Request("http://localhost/x"), {
-      params: Promise.resolve({ name: "open_fail_20261003_120000.png" }),
-    });
-    expect(res.status).toBe(404);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("未找到 damai_shots");
+    // 回落候选（repoRoot/damai_shots、cwd/damai_shots）按 cwd 推导；真实运行
+    // 会在 web/ 下产生 damai_shots。把 cwd 指到 tmp（两级候选均不存在），
+    // 用例不再依赖宿主环境是否有真实截图目录。
+    const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(shotsDir);
+    try {
+      vi.stubEnv("DAMAI_WEB_SHOTS_DIR", path.join(shotsDir, "nope"));
+      const res = await GET(new Request("http://localhost/x"), {
+        params: Promise.resolve({ name: "open_fail_20261003_120000.png" }),
+      });
+      expect(res.status).toBe(404);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("未找到 damai_shots");
+    } finally {
+      cwdSpy.mockRestore();
+    }
   });
 });

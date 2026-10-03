@@ -14,6 +14,40 @@ const STAGES = [
   { id: "human", label: "待人工确认" },
 ];
 
+/** 任务终态集合：只有这些 status 才代表任务结束（SSE 关流）。 */
+export const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+
+/** checklist 阶段名 → 六步流水线下标；未列出的阶段保持上一个已识别阶段。 */
+const PHASE_TO_STAGE: Readonly<Record<string, number>> = {
+  ntp_sync: 0,
+  preheat_open: 1,
+  freeze_check: 1,
+  preheat_warm_dump: 1,
+  countdown: 2,
+  grab_fire: 3,
+};
+
+/**
+ * 从进度行解析当前流水线下标：只认 grabRunner 的 `阶段 → <phase>` 行，
+ * 取最后一次出现的阶段。任务参数行（含「观演人=2 人」「票档=…」等字样）
+ * 不参与匹配——关键词猜测会把参数行误判成执行进度。
+ */
+export function deriveActiveStage(lines: readonly string[]): number {
+  let stage = 0;
+  for (const line of lines) {
+    const match = /^阶段 → ([a-z_]+)$/.exec(line);
+    if (match !== null) {
+      stage = PHASE_TO_STAGE[match[1]] ?? stage;
+    }
+  }
+  return stage;
+}
+
 function clockSummary(result: unknown): string | null {
   if (result === null || typeof result !== "object") {
     return null;
@@ -67,6 +101,11 @@ export function ProgressViewer({ taskId }: { taskId: string | null }) {
           status: string;
           result: unknown;
         };
+        // 服务端在建立连接时也会先发一次「当前状态」（running 任务同样会发）。
+        // 只有终态才视为任务结束并关流；非终态保持订阅，继续接收进度行。
+        if (!TERMINAL_TASK_STATUSES.has(data.status)) {
+          return;
+        }
         setStatus(data.status);
         setFinalResult(data.result);
         es.close();
@@ -93,29 +132,13 @@ export function ProgressViewer({ taskId }: { taskId: string | null }) {
     }
   }, [lines.length]);
 
-  // 从日志流反推当前执行步骤（0 到 5）
+  // 从「阶段 → <phase>」行反推当前执行步骤（0 到 5）；终态直接给定格。
+  // 选观演人/待人工确认两格没有对应阶段事件，运行中保持前一格，由终态收敛。
   const activeStageIndex = useMemo(() => {
     if (status === "succeeded") return 5;
-    if (status === "failed" || status === "cancelled") return -1;
+    if (status === "failed" || status === "cancelled" || status === "interrupted") return -1;
     if (lines.length === 0) return 0;
-
-    const fullLog = lines.slice(-10).join(" ");
-    if (fullLog.includes("ready_for_human") || fullLog.includes("人工确认") || fullLog.includes("已到达确认页")) {
-      return 5;
-    }
-    if (fullLog.includes("观演人") || fullLog.includes("选人") || fullLog.includes("实名")) {
-      return 4;
-    }
-    if (fullLog.includes("票档") || fullLog.includes("立即购买") || fullLog.includes("确定")) {
-      return 3;
-    }
-    if (fullLog.includes("开票判定") || fullLog.includes("去抖门") || fullLog.includes("开抢")) {
-      return 2;
-    }
-    if (fullLog.includes("预热") || fullLog.includes("拉起详情")) {
-      return 1;
-    }
-    return 0;
+    return deriveActiveStage(lines);
   }, [lines, status]);
 
   const copyLogs = () => {

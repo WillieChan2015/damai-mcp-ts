@@ -1,5 +1,6 @@
 "use client";
 
+import { MessageResponse } from "@/components/ai-elements/message";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
@@ -16,8 +17,9 @@ import { useEffect, useRef, useState } from "react";
 
 /**
  * AI 对话面板（设计 §8.5）：useChat + DefaultChatTransport 直连
- * POST /api/ai/chat；文本部分直接渲染，tool- 前缀部分渲染为折叠卡
- * （工具名 + 状态 + 输入/输出 JSON）。流式期间显示指示并提供「停止」。
+ * POST /api/ai/chat；助手文本经 MessageResponse（streamdown）渲染 markdown，
+ * 用户文本保持纯文本；tool- 前缀部分渲染为折叠卡（工具名 + 状态 + 输入/输出 JSON）。
+ * 流式期间显示指示并提供「停止」。
  */
 
 // transport 只依赖静态 api 路径，模块级单例避免每次渲染重建
@@ -190,7 +192,11 @@ export function ChatPanel({ configured }: { configured: boolean }) {
                         : "bg-surface text-ink border border-line"
                     }`}
                   >
-                    <p className="whitespace-pre-wrap">{part.text}</p>
+                    {message.role === "user" ? (
+                      <p className="whitespace-pre-wrap">{part.text}</p>
+                    ) : (
+                      <MessageResponse>{part.text}</MessageResponse>
+                    )}
                   </div>
                 ) : null,
               )}

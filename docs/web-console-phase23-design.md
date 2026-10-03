@@ -176,7 +176,7 @@ export function assertWebBinding(host: string, hasExplicitToken: boolean): boole
 3. 非回环绑定规则：显式 `--token` 强制 + 风险横幅语义。
 4. 反向代理建议：TLS 终结（Caddy/Nginx 示例段）；**SSE 三个流式端点**（`/api/tasks/[id]/events`、`/api/logs/tail`、`/api/ai/chat`）必须 `proxy_buffering off` / `X-Accel-Buffering no`，15s 心跳已内置（`events/route.ts:80-86`）；不要在反代层缓存 `no-store` 响应。
 5. 防火墙建议：首选「保持 127.0.0.1 + SSH 隧道」；确需内网/公网时仅放行可信源 IP，禁用 0.0.0.0 全网段。
-6. 凭证卫生：`DAMAI_WEB_TOKEN` 不入库不外传；`web/data/ai-settings.json`（0600）与 `~/.config/damai-mcp-ts/notify.json`（0600）不要提交仓库。
+6. 凭证卫生：`DAMAI_WEB_TOKEN` 不入库不外传；任务库 `web/data/tasks.db*`（含 AI 设置表，其中存 API Key）与 `~/.config/damai-mcp-ts/notify.json`（0600）不要提交仓库。
 7. 已知边界：MCP 进程（stdio）不受 web token 保护；web lockfile 不覆盖 MCP 并发（见 §1.3）。
 
 ### 2.4 测试计划（remote 项）
@@ -491,22 +491,22 @@ export function buildUiTree(elements: ReadonlyArray<ProbeElement>): UiTreeNode[]
 
 ```ts
 export interface AiSettings { baseUrl: string; apiKey: string; model: string }
-export type AiSettingsSource = "file" | "env" | "none";
+export type AiSettingsSource = "db" | "env" | "none";
 export interface AiSettingsStatus {
   configured: boolean;
   source: AiSettingsSource;
   baseUrl: string | null;     // 非敏感，明文展示
   model: string | null;       // 明文展示
   maskedKey: string | null;   // redactToken 掩码；永不回传原文
-  filePresent: boolean;
 }
-/** 优先级（技术决策 7）：web/data/ai-settings.json（0600）> env
+/** 优先级（技术决策 7）：任务库 ai_settings 表（web/data/tasks.db，
+ *  better-sqlite3 单例行，与任务/观演人快捷项同库；实现同 §1 既有 sqlite 先例）> env
  *  DAMAI_AI_BASE_URL/DAMAI_AI_API_KEY/DAMAI_AI_MODEL > 未配置。
- *  文件缺失/损坏/字段缺失 → 视为无文件配置，回落 env（null 不抛，同 credentials.ts:140 语义）。 */
+ *  库缺失/损坏/行非法 → 视为无库配置，回落 env（null 不抛，同 credentials.ts:140 语义）；
+ *  遗留 web/data/ai-settings.json 在库中无配置时一次性迁入库并删除。 */
 export function loadAiSettings(): AiSettings | null;
-export async function saveAiSettings(s: AiSettings): Promise<void>;   // 原子写 + 0600（tmp+rename+chmod，先例 credentials.ts:102-122）
+export function saveAiSettings(s: AiSettings): void;   // 单例行 UPSERT；落库后库文件（含 -wal/-shm）尽力 chmod 0600（credentials.ts 权限语义）
 export function getAiSettingsStatus(): AiSettingsStatus;
-export function aiSettingsFilePath(): string; // DAMAI_WEB_DATA_DIR ?? <cwd>/data ⇒ web/data/ai-settings.json（与 §1.2 data 目录约定一致）
 ```
 
 - 掩码复用 core 的 `redactToken`（`src/notify/credentials.ts:204` 导出）。
@@ -543,7 +543,7 @@ export function buildAiChatResponse(opts: {
 }): Promise<Response>
 ```
 
-- **未配置分支**：返回 `createUIMessageStreamResponse({ stream: createUIMessageStream({ execute: async ({writer}) => { writer.write({type:"text-start",id:"guide"}); writer.write({type:"text-delta",id:"guide",delta:<引导文案>}); writer.write({type:"text-end",id:"guide"}); } }) })`，chunk 形状已核实（§8.0）。引导文案（中文、可操作）：「尚未配置 AI 提供商：① 打开本页『设置』填入 Base URL / API Key / 模型名（保存到 web/data/ai-settings.json，权限 0600）；或在启动 web 前设置环境变量 DAMAI_AI_BASE_URL / DAMAI_AI_API_KEY / DAMAI_AI_MODEL。」
+- **未配置分支**：返回 `createUIMessageStreamResponse({ stream: createUIMessageStream({ execute: async ({writer}) => { writer.write({type:"text-start",id:"guide"}); writer.write({type:"text-delta",id:"guide",delta:<引导文案>}); writer.write({type:"text-end",id:"guide"}); } }) })`，chunk 形状已核实（§8.0）。引导文案（中文、可操作）：「尚未配置 AI 提供商：① 打开本页『设置』填入 Base URL / API Key / 模型名（保存到任务数据库 web/data/tasks.db）；或在启动 web 前设置环境变量 DAMAI_AI_BASE_URL / DAMAI_AI_API_KEY / DAMAI_AI_MODEL。」
 - **已配置分支**：
 
 ```ts

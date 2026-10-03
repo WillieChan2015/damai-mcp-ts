@@ -336,6 +336,72 @@ describe("延迟占锁与订单终态", () => {
     expect(done?.status).toBe("succeeded");
     expect(done?.progress.some((line) => line.includes("订单页"))).toBe(true);
   });
+
+  it("runner 返回 failed 业务结果 → 任务 failed，error 回落 grab_result.error", async () => {
+    const mgr = new TaskManager();
+    const snap = mgr.start({
+      kind: "grab",
+      deviceId: "dev-failed-dict",
+      runner: async () => ({
+        status: "failed",
+        error: null,
+        grab_result: { status: "failed", error: "详情页加载失败（12038ms）" },
+      }),
+    });
+    await mgr.whenSettled(snap.id);
+    const done = mgr.get(snap.id);
+    expect(done?.status).toBe("failed");
+    expect(done?.error).toBe("详情页加载失败（12038ms）");
+  });
+
+  it("needs_human_captcha 业务结果 → failed；顶层 error 优先于 grab_result.error", async () => {
+    const mgr = new TaskManager();
+    const snap = mgr.start({
+      kind: "grab",
+      deviceId: "dev-captcha",
+      runner: async () => ({
+        status: "needs_human_captcha",
+        error: "检测到滑块验证（请人工过验）",
+        grab_result: { status: "needs_human_captcha", error: "内层原因" },
+      }),
+    });
+    await mgr.whenSettled(snap.id);
+    const done = mgr.get(snap.id);
+    expect(done?.status).toBe("failed");
+    expect(done?.error).toBe("检测到滑块验证（请人工过验）");
+  });
+
+  it("monitor 形态返回值（无顶层 status 字段）不受映射影响 → succeeded", async () => {
+    const mgr = new TaskManager();
+    const snap = mgr.start({
+      kind: "monitor",
+      deviceId: "dev-monitor",
+      runner: async () => ({
+        found: false,
+        final_status: "sold_out",
+        attempts: 3,
+        stop_reason: "max_attempts",
+        error: null,
+      }),
+    });
+    await mgr.whenSettled(snap.id);
+    expect(mgr.get(snap.id)?.status).toBe("succeeded");
+  });
+
+  it("stopEvent 置位 + failed 业务结果 → cancelled（取消语义优先，与 throw 路径一致）", async () => {
+    const mgr = new TaskManager();
+    const snap = mgr.start({
+      kind: "grab",
+      deviceId: "dev-cancel-failed",
+      runner: async ({ stopEvent }) => {
+        stopEvent.set();
+        return { status: "failed", grab_result: { status: "failed", error: "已取消时的失败" } };
+      },
+    });
+    await mgr.whenSettled(snap.id);
+    const done = mgr.get(snap.id);
+    expect(done?.status).toBe("cancelled");
+  });
 });
 
 describe("TaskManager 持久化与跨进程锁（Phase 2）", () => {

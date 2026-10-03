@@ -10,8 +10,9 @@ export const dynamic = "force-dynamic";
  *
  * - GET：回 {@link getAiSettingsStatus} 掩码状态（apiKey 只回 maskedKey，
  *   原文永不出现；no-store 防中间层缓存）。
- * - POST：zod 校验 `{baseUrl, apiKey, model}` → saveAiSettings（0600 原子写）
- *   → 回最新 status；非法 body → 400 中文（逐字段点名）。
+ * - POST：zod 校验 `{baseUrl, apiKey, model}` → saveAiSettings（落任务库
+ *   `ai_settings` 表，库文件权限收紧 0600）→ 回最新 status；非法 body →
+ *   400 中文（逐字段点名）。
  * - 鉴权由 src/proxy.ts 的 matcher 统一覆盖，本路由不自行实现鉴权。
  */
 
@@ -68,7 +69,7 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
   try {
-    await saveAiSettings(parsed.data);
+    saveAiSettings(parsed.data);
   } catch (exc) {
     const message = exc instanceof Error ? exc.message : String(exc);
     logPageOperation("保存 AI 设置", startedAt, "failed", message);

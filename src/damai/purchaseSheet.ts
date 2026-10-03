@@ -151,14 +151,20 @@ export function parsePurchaseSheet(elements: readonly UIElement[]): PurchaseShee
   const badges = elements.filter((element) => element.visible && visibleText(element) === "缺货登记");
   return {
     sessions: listSessionCards(elements).map((element) => ({
-      label: visibleText(element),
+      label: normalizeSheetLabel(visibleText(element)),
       picked: element.selected,
     })),
-    prices: listPriceCards(elements).map((element) => ({
-      label: visibleText(element),
-      soldOut: badges.some((badge) => overlaps(badge, element)),
-      picked: element.selected,
-    })),
+    prices: listPriceCards(elements).map((element) => {
+      const raw = visibleText(element);
+      return {
+        label: normalizeSheetLabel(raw),
+        // 缺货登记有两种节点形态：与卡片重叠的独立角标节点，或拼在正文行尾
+        // （"看台588元缺货登记"）。两种都视为该档当前不可购。
+        soldOut:
+          badges.some((badge) => overlaps(badge, element)) || PRICE_SOLD_OUT_SUFFIX.test(raw),
+        picked: element.selected,
+      };
+    }),
   };
 }
 
@@ -201,6 +207,19 @@ export function sheetHeadingsReady(elements: readonly UIElement[]): boolean {
 }
 
 const OCR_BADGES = ["预售", "可预约", "缺货登记"] as const;
+
+/** 价签卡上表示「当前不可购」的行尾角标后缀。预售不算——预售场次仍是可选项。 */
+const PRICE_SOLD_OUT_SUFFIX = /(?:\s*(?:可预约|缺货登记))+$/;
+
+/**
+ * 卡片显示名的归一形态：剥掉行尾重复的角标（预售 / 可预约 / 缺货登记）并收尾空白。
+ * 真机上角标可能与卡片正文同节点（"看台588元缺货登记"），也可能独立成节点；
+ * 归一化后两种形态与用户配置的纯文本档位名（"看台588元"）可以一致地比对。
+ * OCR 路径的 {@link stripOcrBadges} 与本函数同规则。
+ */
+export function normalizeSheetLabel(text: string): string {
+  return stripOcrBadges(text).trim();
+}
 
 export interface OcrBox {
   bounds: Bounds;

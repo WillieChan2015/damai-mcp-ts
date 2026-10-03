@@ -42,3 +42,6 @@ next-env.d.ts
 
 # 任务持久化（运行时 SQLite，勿提交；.gitkeep 保留）
 /data/tasks.db*
+
+# AI 设置旧版 JSON 文件（含 API Key，现已迁入 tasks.db；兜底勿提交）
+/data/ai-settings.json

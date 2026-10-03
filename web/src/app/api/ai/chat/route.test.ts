@@ -1,7 +1,8 @@
 /**
  * /api/ai/chat 路由测试（设计 §8.6③，mock 全链路、全程不出网）：
  * 模型用 ai/test 的 MockLanguageModelV4 + simulateReadableStream 注入；
- * 配置经 DAMAI_WEB_DATA_DIR（空临时目录）+ DAMAI_AI_* env 直灌，无文件。
+ * 配置经 DAMAI_WEB_TASK_DB（临时目录，库不存在）+ DAMAI_WEB_DATA_DIR（隔离
+ * 本机遗留 ai-settings.json）+ DAMAI_AI_* env 直灌，无库配置。
  * 真实 OpenAI 兼容商联调本机无 key，留待用户持有 key 时验证。
  */
 import { mkdtempSync, rmSync } from "node:fs";
@@ -17,6 +18,7 @@ import { buildAiChatResponse, POST } from "./route";
 
 /** 本机真实 env 的原值（afterAll 复位）。 */
 const ENV_KEYS = [
+  "DAMAI_WEB_TASK_DB",
   "DAMAI_WEB_DATA_DIR",
   "DAMAI_AI_BASE_URL",
   "DAMAI_AI_API_KEY",
@@ -30,7 +32,7 @@ const ENV_BASE_URL = "https://mock-provider.example.com/v1";
 const ENV_API_KEY = "sk-test-key-abcdef";
 const ENV_MODEL = "mock-model";
 
-/** 当前用例的空临时数据目录（隔离本机 web/data/ai-settings.json）。 */
+/** 当前用例的空临时数据目录（隔离本机 web/data/tasks.db 与遗留 ai-settings.json）。 */
 let dataDir: string;
 
 function clearAiEnv(): void {
@@ -61,9 +63,11 @@ const ZERO_USAGE = {
 } as const;
 
 beforeEach(() => {
-  // 先清空再注入：clearAiEnv 会删掉 DAMAI_WEB_DATA_DIR，顺序不能反
+  // 先清空再注入：clearAiEnv 会删掉 DAMAI_WEB_* 两个变量，顺序不能反
   clearAiEnv();
   dataDir = mkdtempSync(join(tmpdir(), "ai-chat-route-test-"));
+  process.env.DAMAI_WEB_TASK_DB = join(dataDir, "tasks.db");
+  // 遗留迁移路径钉到临时目录，防止 loadAiSettings 触发迁移时碰本机真实遗留文件
   process.env.DAMAI_WEB_DATA_DIR = dataDir;
 });
 

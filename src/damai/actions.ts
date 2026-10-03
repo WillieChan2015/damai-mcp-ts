@@ -25,6 +25,7 @@ import {
   applyOcrLabels,
   listPriceCards,
   listSessionCards,
+  normalizeSheetLabel,
   parsePurchaseSheet,
   PRICE_CARD_TEXT,
   priceListReady,
@@ -36,6 +37,7 @@ import {
   type PurchaseSheetOptions,
 } from "./purchaseSheet";
 import { DamaiSelectors } from "./selectors";
+import { NOT_ON_SALE_CTA_WORDS } from "./cta";
 
 /** 大麦 app 包名。 */
 export const DAMAI_PACKAGE = "cn.damai";
@@ -81,10 +83,14 @@ export type LoginCheckResult = {
 /** {@link damaiOpenConcert} 的返回结构。 */
 export type OpenConcertResult = {
   item_id: string;
-  /** 详情页是否加载完成（购买按钮出现）。 */
+  /** 详情页是否加载完成（购买入口可用：CTA 文案命中或购买弹层已打开）。 */
   loaded: boolean;
   /** 打开耗时（毫秒）。 */
   elapsed_ms: number;
+  /** 入口状态（additive）：buyable=CTA 文案命中；sheet_open=购买弹层已打开；unknown=无信号。 */
+  state?: "buyable" | "sheet_open" | "unknown";
+  /** 命中证据（CTA 文案或固定说明）；unknown 时为 null。 */
+  evidence?: string | null;
 };
 
 /** {@link damaiGrab} 的返回结构。`failed` 分支只含基础四键。 */
@@ -398,8 +404,13 @@ export async function damaiLoginCheck(
 /**
  * 通过 item_id 跳转到演唱会详情页。
  *
- * 优先用 app 能处理的深链 scheme `damai://item?id=...`；失败时经 adb am start
- * 回退到 web URL 强制在 app 内打开。
+ * 深链链（本机实测：ProjectDetailActivity 注册的 authority 是
+ * detail / projectdetail / trade/detail，`damai://item` 解析失败——
+ * 但旧版本可能仍路由它，故保留在链尾）；web URL 只作最后兜底
+ * （部分设备会落系统浏览器而非 app 内）。
+ *
+ * 加载判定：购买 CTA 文案变体（预售态 CTA 为「立即预订」，只等「立即购买」
+ * 会把可购票页误判成加载失败）→ 购买弹层谓词 → SKU 弹层 Activity 在前台。
  *
  * @returns {@link OpenConcertResult}
  */
@@ -414,38 +425,71 @@ export async function damaiOpenConcert(
 ): Promise<OpenConcertResult> {
   const t0 = nowSec();
   const sel = selectors ?? new DamaiSelectors();
-  // 方案 1：app 深链
-  await shell(
-    "am", "start", "-W", "-a", "android.intent.action.VIEW",
-    "-d", `damai://item?id=${itemId}`,
-    { deviceId, check: false, timeout: 10 },
-  );
-  await waitMs(settleMs);
-  if (!(await isDamaiForeground(deviceId))) {
-    // 方案 2：web URL → 强制在 app 内打开
+  for (const link of [`damai://detail?id=${itemId}`, `damai://item?id=${itemId}`]) {
     await shell(
       "am", "start", "-W", "-a", "android.intent.action.VIEW",
-      "-d", `https://m.damai.cn/shows/item.html?itemId=${itemId}`,
+      "-d", link,
       { deviceId, check: false, timeout: 10 },
     );
-    await waitMs(2000);
+    await waitMs(settleMs);
+    if (await isDamaiForeground(deviceId)) {
+      break;
+    }
   }
-  // 等购买按钮出现（说明页面加载完成）
-  let loaded = false;
+  if (!(await isDamaiForeground(deviceId))) {
+    for (const url of [
+      `https://m.damai.cn/damai/perform/item.html?itemId=${itemId}`,
+      `https://m.damai.cn/shows/item.html?itemId=${itemId}`,
+    ]) {
+      await shell(
+        "am", "start", "-W", "-a", "android.intent.action.VIEW",
+        "-d", url,
+        { deviceId, check: false, timeout: 10 },
+      );
+      await waitMs(2000);
+      if (await isDamaiForeground(deviceId)) {
+        break;
+      }
+    }
+  }
+  let state: "buyable" | "sheet_open" | "unknown" = "unknown";
+  let evidence: string | null = null;
   if (buyButtonTimeout > 0) {
-    try {
-      await waitForElement(deviceId, `text=${sel.detailBuyButton}`, { timeout: buyButtonTimeout });
-      loaded = true;
-    } catch (exc) {
-      if (!(exc instanceof UIElementNotFoundError)) {
-        throw exc;
+    const btn = await findBuyButtonByVariants(deviceId, sel, Math.max(buyButtonTimeout / 3, 1.5));
+    if (btn !== null) {
+      state = "buyable";
+      evidence = btn.text.trim();
+    } else {
+      const elements = await dumpUi(deviceId);
+      if (
+        sheetHeadingsReady(elements) ||
+        priceListReady(elements) ||
+        sessionCardsAwaitingPrices(elements).length > 0
+      ) {
+        state = "sheet_open";
+        evidence = "购买弹层已打开";
+      } else if (await isSkuSheetForeground(deviceId)) {
+        state = "sheet_open";
+        evidence = "SKU 购买弹层 Activity 在前台";
+      } else {
+        // CTA 子树不进无障碍树的版本（本机实测）：OCR 读底部条是唯一可靠读法。
+        // not_buyable 时不置 loaded——上层报错会带上可见的 CTA 文案。
+        const cta = await readBottomCta(deviceId, sel);
+        if (cta.kind === "buyable") {
+          state = "buyable";
+          evidence = `${cta.label}（OCR）`;
+        } else if (cta.kind === "not_buyable") {
+          evidence = `CTA 为「${cta.label}」，当前不可购`;
+        }
       }
     }
   }
   return {
     item_id: itemId,
-    loaded,
+    loaded: state !== "unknown",
     elapsed_ms: Math.trunc((nowSec() - t0) * 1000),
+    state,
+    evidence,
   };
 }
 
@@ -536,6 +580,29 @@ function joinedLabels(elements: readonly UIElement[]): string {
 }
 
 /**
+ * 票档卡片与解析选项按序配对（{@link parsePurchaseSheet} 内部同样按
+ * {@link listPriceCards} 的顺序产出 prices）。option.label 为归一化正文——
+ * 角标与正文同节点（"看台588元缺货登记"）与独立角标节点（"看台588元" +
+ * 重叠角标）两种形态都能按用户配置的纯文本档位名命中。
+ */
+function zipPriceOptions(
+  elements: readonly UIElement[],
+): Array<{ card: UIElement; option: PurchasePriceOption }> {
+  const cards = listPriceCards(elements);
+  const prices = parsePurchaseSheet(elements).prices;
+  const paired = Math.min(cards.length, prices.length);
+  const zipped: Array<{ card: UIElement; option: PurchasePriceOption }> = [];
+  for (let i = 0; i < paired; i += 1) {
+    const card = cards[i];
+    const option = prices[i];
+    if (card !== undefined && option !== undefined) {
+      zipped.push({ card, option });
+    }
+  }
+  return zipped;
+}
+
+/**
  * 点购买弹层里的一场。
  *
  * `sessionLabel` 非空时按卡片全文点，点不中不退回序号。
@@ -552,15 +619,20 @@ export async function damaiSelectSession(
   }: { sessionLabel?: string; timeout?: number } = {},
 ): Promise<UIElement | null> {
   const label = sessionLabel.trim();
+  const wanted = normalizeSheetLabel(label);
   const elements = await loadSheetElements(deviceId, timeout, (nodes) => {
-    if (label !== "") {
-      return listSessionCards(nodes).some((card) => card.text.trim() === label) || sheetHasChoice(nodes);
+    if (wanted !== "") {
+      return (
+        listSessionCards(nodes).some((card) => normalizeSheetLabel(card.text.trim()) === wanted) ||
+        sheetHasChoice(nodes)
+      );
     }
     return sheetHasChoice(nodes);
   });
   const cards = listSessionCards(elements);
-  if (label !== "") {
-    const target = cards.find((card) => card.text.trim() === label);
+  if (wanted !== "") {
+    // 归一化比对：场次卡片行尾可能拼着「预售」角标（同节点形态）
+    const target = cards.find((card) => normalizeSheetLabel(card.text.trim()) === wanted);
     if (target === undefined) {
       if (!sheetHasChoice(elements)) {
         throw new DamaiGrabFailedError(`价格表未弹出: 未找到场次「${label}」`);
@@ -628,10 +700,11 @@ export async function damaiSelectPrice(
 ): Promise<UIElement> {
   void selectors;
   const label = priceLabel.trim();
+  const wanted = normalizeSheetLabel(label);
   const elements = await loadSheetElements(deviceId, timeout, (nodes) => {
     const cards = listPriceCards(nodes);
-    if (label !== "") {
-      return cards.some((card) => card.text.trim() === label);
+    if (wanted !== "") {
+      return cards.some((card) => normalizeSheetLabel(card.text.trim()) === wanted);
     }
     return cards.length > 0;
   });
@@ -646,21 +719,35 @@ export async function damaiSelectPrice(
     throw new DamaiGrabFailedError(`价格表未弹出: ${detail}`);
   }
   const labels = joinedLabels(priceEls);
+  const zipped = zipPriceOptions(elements);
   let target: UIElement | undefined;
-  if (label !== "") {
-    target = priceEls.find((element) => element.text.trim() === label);
-    if (target === undefined) {
+  if (wanted !== "") {
+    const entry = zipped.find((item) => item.option.label === wanted);
+    if (entry === undefined) {
       throw new DamaiGrabFailedError(`未找到票档「${label}」，当前有: ${labels}`);
     }
+    // 缺货登记/可预约卡片绝不点击：点击进入的是登记/预约流程而非购票
+    if (entry.option.soldOut) {
+      throw new DamaiGrabFailedError(
+        `票档「${entry.option.label}」当前缺货或需预约（缺货登记/可预约角标），未点击`,
+      );
+    }
+    target = entry.card;
   } else if (priceIndex < 1 || priceIndex > priceEls.length) {
     throw new DamaiGrabFailedError(
       `price_index=${priceIndex} 超出范围 (1..${priceEls.length}): ${labels}`,
     );
   } else {
-    target = priceEls[priceIndex - 1];
-  }
-  if (target === undefined) {
-    throw new DamaiGrabFailedError(`price_index=${priceIndex} 超出范围 (1..${priceEls.length})`);
+    const entry = zipped[priceIndex - 1];
+    if (entry === undefined) {
+      throw new DamaiGrabFailedError(`price_index=${priceIndex} 超出范围 (1..${priceEls.length})`);
+    }
+    if (entry.option.soldOut) {
+      throw new DamaiGrabFailedError(
+        `票档「${entry.option.label}」当前缺货或需预约（缺货登记/可预约角标），未点击`,
+      );
+    }
+    target = entry.card;
   }
   return tapChoice(deviceId, target, "票档");
 }
@@ -815,18 +902,17 @@ export async function damaiSelectPriceByPriority(
     const detail = sawNewCard ? "未找到价格卡片" : "未找到任何 ¥xxx 价格元素";
     throw new DamaiGrabFailedError(`价格表未弹出: ${detail}`);
   }
-  const parsed = parsePurchaseSheet(elements);
-  const byLabel = new Map<string, PurchasePriceOption>(parsed.prices.map((price) => [price.label, price]));
+  const zipped = zipPriceOptions(elements);
+  const byLabel = new Map(zipped.map((item) => [item.option.label, item]));
   for (const label of wanted) {
-    const card = cards.find((element) => element.text.trim() === label);
-    const option = byLabel.get(label);
-    if (card === undefined || option?.soldOut === true) {
+    const entry = byLabel.get(label);
+    if (entry === undefined || entry.option.soldOut) {
       continue;
     }
-    return tapChoice(deviceId, card, "票档");
+    return tapChoice(deviceId, entry.card, "票档");
   }
   const present = wanted.filter((label) => byLabel.has(label));
-  if (present.length > 0 && present.every((label) => byLabel.get(label)?.soldOut === true)) {
+  if (present.length > 0 && present.every((label) => byLabel.get(label)?.option.soldOut === true)) {
     throw new DamaiGrabFailedError(`${PRICE_FALLBACKS_SOLD_OUT}：${wanted.join("、")}`);
   }
   throw new DamaiGrabFailedError(
@@ -840,6 +926,106 @@ const RESERVE_ENTRY_TEXTS = ["去预约", "提前预约", "预约抢票"] as con
  * 详情页底部购票条。已预约、立即购买都画在这个容器里，文字经常不进无障碍树。
  */
 const PURCHASE_BAR_ID = "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl";
+
+/**
+ * SKU 购买弹层 Activity 特征串（dumpsys window 命中即视为弹层已打开）。
+ * 本机实测：弹层是独立 Activity 且无 VIEW filter——无法深链进入，只能点击；
+ * dumpsys 检测比 a11y 谓词更可靠（不受弹层渲染进度影响）。
+ */
+export const DAMAI_SKU_ACTIVITY_MARKER =
+  "commonbusiness.seatbiz.sku.qilin.ui.NcovSkuActivity";
+
+/** 购买弹层（NcovSkuActivity）是否在前台。 */
+export async function isSkuSheetForeground(deviceId: string): Promise<boolean> {
+  const out = await shell("dumpsys", "window", "windows", {
+    deviceId,
+    timeout: 5,
+    check: false,
+  });
+  return out.includes(DAMAI_SKU_ACTIVITY_MARKER);
+}
+
+/** 依次尝试三个购买 CTA 文案变体（立即购买 / 立即预订 / 选座购买）；命中返回元素。 */
+async function findBuyButtonByVariants(
+  deviceId: string,
+  sel: DamaiSelectors,
+  perVariantTimeout: number,
+): Promise<UIElement | null> {
+  for (const label of [sel.detailBuyButton, sel.detailBuyButtonAlt, sel.detailBuyButtonAlt2]) {
+    try {
+      return await waitForElement(deviceId, `text=${label}`, { timeout: perVariantTimeout });
+    } catch (exc) {
+      if (exc instanceof UIElementNotFoundError) {
+        continue;
+      }
+      throw exc;
+    }
+  }
+  return null;
+}
+
+/** 解析 PNG IHDR 的宽高（bytes 16-23）；非 PNG / 截断返回 null。 */
+function pngSize(png: Buffer): { w: number; h: number } | null {
+  if (png.length < 24 || png.readUInt32BE(0) !== 0x89504e47) {
+    return null;
+  }
+  return { w: png.readUInt32BE(16), h: png.readUInt32BE(20) };
+}
+
+/** {@link readBottomCta} 的结果：可购（带点击坐标）/ 不可购（带文案）/ 读不出。 */
+export type BottomCta =
+  | { kind: "buyable"; label: string; center: [number, number] }
+  | { kind: "not_buyable"; label: string }
+  | { kind: "unreadable" };
+
+/**
+ * OCR 读取底部购买条 CTA 文案。
+ *
+ * 本机实测：详情页底部 CTA 整个子树不进无障碍树（文本与容器 rid 均稳定缺失，
+ * 标准 uiautomator dump 又因页面 idle 不收敛不可用）——文本/rid 都找不到时，
+ * 这是判断 CTA 是否可购的唯一可靠读法。只在屏幕底部带内做**全等**文案匹配：
+ * 页面中部（巡演城市「预约」角标等）的字样绝不参与，避免误判。
+ * 截图 / OCR / 解析任何一步失败都按 unreadable 处理（调用方走通用兜底）。
+ */
+export async function readBottomCta(deviceId: string, sel: DamaiSelectors): Promise<BottomCta> {
+  try {
+    const png = await screenshot(deviceId);
+    if (!Buffer.isBuffer(png)) {
+      return { kind: "unreadable" };
+    }
+    const size = pngSize(png);
+    if (size === null) {
+      return { kind: "unreadable" };
+    }
+    const boxes = (await recognizeTextBoxes(png)).filter((box) => {
+      const [x1, y1, x2, y2] = box.bounds;
+      return (y1 + y2) / 2 >= size.h * 0.88 && (x1 + x2) / 2 >= size.w * 0.25;
+    });
+    const buyableTexts = new Set([sel.detailBuyButton, sel.detailBuyButtonAlt, sel.detailBuyButtonAlt2]);
+    const inBandTexts = boxes.map((box) => box.text.trim()).filter((text) => text !== "");
+    const buyable = [...buyableTexts].find(
+      (label) => inBandTexts.includes(label) || inBandTexts.join("") === label,
+    );
+    if (buyable !== undefined) {
+      // 坐标取第一个带文本的 box（多行 CTA 时各 box 同属一个按钮区域）
+      const box = boxes.find((item) => item.text.trim() !== "");
+      if (box !== undefined) {
+        const [x1, y1, x2, y2] = box.bounds;
+        return { kind: "buyable", label: buyable, center: [Math.floor((x1 + x2) / 2), Math.floor((y1 + y2) / 2)] };
+      }
+    }
+    const notBuyable = inBandTexts.find((text) =>
+      NOT_ON_SALE_CTA_WORDS.some((word) => text === word),
+    );
+    if (notBuyable !== undefined) {
+      return { kind: "not_buyable", label: notBuyable };
+    }
+    return { kind: "unreadable" };
+  } catch (exc) {
+    logger.warning(`[cta] 读取底部 CTA 失败（按 unreadable 处理）: ${excToStr(exc)}`);
+    return { kind: "unreadable" };
+  }
+}
 
 async function tapExactText(deviceId: string, labels: readonly string[], timeout: number): Promise<boolean> {
   for (const label of labels) {
@@ -893,6 +1079,16 @@ async function tapDetailBuyButton(
   const again = await dumpUi(deviceId, { compressed: false });
   if (await tapPurchaseBar(again, deviceId)) {
     return;
+  }
+  // CTA 子树不进无障碍树的版本（本机实测）：OCR 读底部条，确认可购才坐标点击
+  const cta = await readBottomCta(deviceId, sel);
+  if (cta.kind === "buyable") {
+    logger.info(`OCR 读到 CTA「${cta.label}」，坐标点击打开购买弹层`);
+    await tap(deviceId, ...cta.center);
+    return;
+  }
+  if (cta.kind === "not_buyable") {
+    throw new DamaiGrabFailedError(`详情页 CTA 为「${cta.label}」，当前不可购，无法读取场次与票档`);
   }
   throw new DamaiGrabFailedError("找不到立即购买或预约入口，无法读取场次与票档");
 }
@@ -1286,8 +1482,9 @@ export async function damaiGrab(
       const shot = join(shotsDirPath, `open_fail_${truncSec()}.png`);
       await screenshot(deviceId, shot);
       logPaths.push(shot);
+      const note = openRes.evidence ? `，入口状态: ${openRes.evidence}` : "";
       throw new DamaiGrabFailedError(
-        `详情页加载失败（${openRes.elapsed_ms}ms），截图: ${shot}`,
+        `详情页加载失败（${openRes.elapsed_ms}ms${note}），截图: ${shot}`,
       );
     }
 
@@ -1394,30 +1591,31 @@ export async function damaiGrab(
       if (stopEvent !== null && stopEvent.isSet()) {
         return cancelledBeforeSubmit(attemptNo);
       }
-      // 6. 点购买按钮（尝试所有已知文案变体）
-      let buyBtn: UIElement | null = null;
-      for (const label of [
-        sel.detailBuyButton,
-        sel.detailBuyButtonAlt,
-        sel.detailBuyButtonAlt2,
-      ]) {
-        try {
-          buyBtn = await waitForElement(deviceId, `text=${label}`, { timeout: 1.5 });
-          break;
-        } catch (exc) {
-          if (exc instanceof UIElementNotFoundError) {
-            continue;
+      // 6. 打开购买弹层：弹层已在前台（独立 Activity）则直接进入选档；
+      //    否则按 文本变体 → purchase bar rid → OCR 门控坐标点击 的顺序找入口。
+      if (await isSkuSheetForeground(deviceId)) {
+        logger.info("购买弹层已在前台，跳过点购买入口");
+      } else {
+        const buyBtn = await findBuyButtonByVariants(deviceId, sel, 1.5);
+        if (buyBtn !== null) {
+          await tap(deviceId, ...buyBtn.center);
+        } else {
+          const cta = await readBottomCta(deviceId, sel);
+          if (cta.kind === "buyable") {
+            logger.info(`OCR 读到 CTA「${cta.label}」，坐标点击打开购买弹层`);
+            await tap(deviceId, ...cta.center);
+          } else {
+            const shot = join(shotsDirPath, `no_buy_btn_${truncSec()}.png`);
+            await screenshot(deviceId, shot);
+            logPaths.push(shot);
+            const detail =
+              cta.kind === "not_buyable"
+                ? `详情页 CTA 为「${cta.label}」，当前不可购`
+                : "找不到立即购买按钮";
+            throw new GrabRetryableError("buy_button", `${detail}，截图: ${shot}`);
           }
-          throw exc;
         }
       }
-      if (buyBtn === null) {
-        const shot = join(shotsDirPath, `no_buy_btn_${truncSec()}.png`);
-        await screenshot(deviceId, shot);
-        logPaths.push(shot);
-        throw new GrabRetryableError("buy_button", `找不到立即购买按钮，截图: ${shot}`);
-      }
-      await tap(deviceId, ...buyBtn.center);
 
       // 7. 选场次，再选票档（「价格表未弹出」属可重试失败）
       try {

@@ -152,9 +152,10 @@ iptables -A INPUT -p tcp --dport 6123 -j DROP
 
 - **`DAMAI_WEB_TOKEN`**：只经环境变量注入 Next 进程，不落任何文件。不要写进 shell
   rc、`.env` 等会入库的文件；泄露后立即换新并重启；
-- **`web/data/ai-settings.json`**（权限 0600）：AI 提供商配置，**含 API Key**，绝不能
-  提交仓库——提交前确认 `.gitignore` 确实覆盖该目录（当前 `web/.gitignore` 尚未包含
-  `data/`，需自行补规则）；
+- **AI 提供商配置**（存于任务库 `web/data/tasks.db` 的 `ai_settings` 表，**含 API
+  Key**）：库文件由 `web/.gitignore` 的 `/data/tasks.db*` 覆盖，绝不能提交仓库；
+  旧版独立 JSON 文件 `web/data/ai-settings.json` 已废弃——读取时自动迁入库并删除，
+  `.gitignore` 保留兜底规则；
 - **`~/.config/damai-mcp-ts/notify.json`**（权限 0600）：ClawBot 通知凭证，位于仓库外
   的用户配置目录，天然不入库——移动/备份仓库时不要把它拷进去；
 - 浏览器侧 token 换取一次即可（Cookie 30 天有效）；终端里打印的 token 视同设备密码，
