@@ -1,3 +1,5 @@
+import { DeviceLockfile, resolveLockfilePath } from "./lockfile";
+import { createSqliteTaskStore, resolveTaskDbPath, type TaskStore } from "./persistence";
 import { SimpleStopEvent } from "./stopEvent";
 
 /** 任务 id：Web Crypto（Edge 与 Node ≥19 通用），保持本模块运行时中立（D8）。 */
@@ -20,7 +22,18 @@ function generateTaskId(): string {
 
 export type TaskKind = "grab" | "monitor" | "custom";
 
-export type TaskStatus = "running" | "cancelling" | "cancelled" | "succeeded" | "failed";
+/**
+ * 任务状态。`interrupted`（Phase 2 persistence，additive）为启动恢复时对上个
+ * 进程遗留 running/cancelling 行的历史标注——任务本身已随进程消失，只能如实
+ * 标注，运行中任务绝不产出该状态。
+ */
+export type TaskStatus =
+  | "running"
+  | "cancelling"
+  | "cancelled"
+  | "succeeded"
+  | "failed"
+  | "interrupted";
 
 /** 传给任务执行体的上下文。 */
 export interface TaskRunContext {
@@ -104,10 +117,82 @@ export interface CancelOptions {
   forceAfterMs?: number;
 }
 
+/** TaskManager 可选依赖注入（Phase 2 persistence）：缺省全部关闭，行为与纯内存版完全一致。 */
+export interface TaskManagerDeps {
+  /** 任务持久化存储；缺省/null = 不持久化。 */
+  store?: TaskStore | null;
+  /** 跨进程设备锁（D4）；缺省/null = 只做单进程内存互斥。 */
+  lockfile?: DeviceLockfile | null;
+}
+
+/** 等价于 Python 的 str(exc)：Error 取 message，其余 String()。 */
+function excToStr(exc: unknown): string {
+  return exc instanceof Error ? exc.message : String(exc);
+}
+
 export class TaskManager {
   private readonly tasks = new Map<string, TaskEntry>();
   /** deviceId → 运行中/取消中的 taskId。任务终结时释放。 */
   private readonly deviceLocks = new Map<string, string>();
+  /** 任务持久化存储（null = 不持久化）。 */
+  private readonly store: TaskStore | null;
+  /** 跨进程设备锁（null = 不做跨进程互斥）。 */
+  private readonly lockfile: DeviceLockfile | null;
+
+  /**
+   * @param deps 可选依赖；缺省构造（`new TaskManager()`）时 store/lockfile 均为
+   * null，不产生任何文件 I/O。注入 store 时构造函数内执行启动恢复：把落盘的
+   * 历史任务重建为只读内存 entry，遗留 running/cancelling 行改标 interrupted。
+   */
+  constructor(deps?: TaskManagerDeps) {
+    this.store = deps?.store ?? null;
+    this.lockfile = deps?.lockfile ?? null;
+    if (this.store) {
+      this.restoreFromStore();
+    }
+  }
+
+  /**
+   * 启动恢复（仅当注入 store 时执行）：loadAll 把落盘历史逐行重建为只读内存 entry。
+   *
+   * - 遗留 running/cancelling 行（上个进程崩溃/退出时未收敛）改标 "interrupted"，
+   *   endedAtUnixMs 缺失时补当前时刻，保证 whenSettled 对其立即 resolve；
+   * - 不登记 deviceLocks（历史任务不占用设备，同设备可直接 start 新任务）、
+   *   不挂 stopEvent/订阅者；
+   * - progress/progressTotal 从 progress_tail/progress_total 恢复
+   *   （SSE backlog 可回看历史行的尾部进度）。
+   */
+  private restoreFromStore(): void {
+    let snapshots: TaskSnapshot[];
+    try {
+      snapshots = this.store!.loadAll();
+    } catch (exc) {
+      // store 合同要求自吞错误；此处兜底：恢复失败按无历史处理，不阻断启动
+      console.error(`任务启动恢复失败（按无历史任务处理）: ${excToStr(exc)}`);
+      return;
+    }
+    for (const snap of snapshots) {
+      const interrupted = snap.status === "running" || snap.status === "cancelling";
+      this.tasks.set(snap.id, {
+        id: snap.id,
+        kind: snap.kind,
+        deviceId: snap.deviceId,
+        label: snap.label,
+        status: interrupted ? "interrupted" : snap.status,
+        startedAtUnixMs: snap.startedAtUnixMs,
+        endedAtUnixMs: snap.endedAtUnixMs ?? Date.now(),
+        stopEvent: new SimpleStopEvent(),
+        unresponsive: snap.unresponsive,
+        error: snap.error,
+        progress: [...snap.progress],
+        progressTotal: snap.progressTotal,
+        subscribers: new Set(),
+        result: snap.result,
+        cancelTimer: null,
+        settleWaiters: [],
+      });
+    }
+  }
 
   /** 登记并启动一个任务，立即返回快照（不等待任务完成）。 */
   start(opts: TaskStartOptions): TaskSnapshot {
@@ -117,6 +202,9 @@ export class TaskManager {
     }
 
     const id = generateTaskId();
+    // 跨进程互斥（D4）：先清理过期条目再占用；被其他存活 web 进程持有 →
+    // TaskConflictError(deviceId, 持有者 taskId)，与内存锁同一错误类型
+    this.lockfile?.acquire(opts.deviceId, id);
     const entry: TaskEntry = {
       id,
       kind: opts.kind,
@@ -137,6 +225,8 @@ export class TaskManager {
     };
     this.tasks.set(id, entry);
     this.deviceLocks.set(opts.deviceId, id);
+    // running 状态落盘（须先于 run：runner 若同步完成，终态 upsert 要覆盖在本条之后）
+    this.persist(entry);
     void this.run(entry, opts.runner);
     return this.snapshot(entry);
   }
@@ -158,8 +248,10 @@ export class TaskManager {
       if (forceAfterMs > 0 && entry.cancelTimer === null) {
         entry.cancelTimer = setTimeout(() => {
           entry.unresponsive = true;
+          this.persist(entry);
         }, forceAfterMs);
       }
+      this.persist(entry);
     }
     return this.snapshot(entry);
   }
@@ -243,11 +335,38 @@ export class TaskManager {
       if (this.deviceLocks.get(entry.deviceId) === entry.id) {
         this.deviceLocks.delete(entry.deviceId);
       }
+      // 终态落盘 + 跨进程锁释放（均须先于 settle waiters 唤醒）
+      this.persist(entry);
+      this.releaseDeviceLock(entry);
       const waiters = [...entry.settleWaiters];
       entry.settleWaiters = [];
       for (const fn of waiters) {
         fn();
       }
+    }
+  }
+
+  /** 状态落盘（store 合同要求自吞错误；此处兜底，防注入实现抛错拖垮任务）。 */
+  private persist(entry: TaskEntry): void {
+    if (!this.store) {
+      return;
+    }
+    try {
+      this.store.upsert(this.snapshot(entry));
+    } catch (exc) {
+      console.error(`任务状态落盘失败（忽略，不影响任务运行）: ${excToStr(exc)}`);
+    }
+  }
+
+  /** 释放跨进程设备锁（release 幂等且自吞写失败；兜底防异常中断终态收敛）。 */
+  private releaseDeviceLock(entry: TaskEntry): void {
+    if (!this.lockfile) {
+      return;
+    }
+    try {
+      this.lockfile.release(entry.deviceId, entry.id);
+    } catch (exc) {
+      console.error(`跨进程设备锁释放失败（忽略，等过期清理兜底）: ${excToStr(exc)}`);
     }
   }
 
@@ -294,7 +413,13 @@ export function getTaskManager(): TaskManager {
   if (existing) {
     return existing;
   }
-  const created = new TaskManager();
+  // 注入持久化与跨进程锁（Phase 2）：store 为 better-sqlite3 惰性打开
+  // （首次 upsert/loadAll 才建文件）、lockfile 构造零副作用，
+  // 因此仅比对单例身份的测试路径不产生任何文件 I/O。
+  const created = new TaskManager({
+    store: createSqliteTaskStore(resolveTaskDbPath()),
+    lockfile: new DeviceLockfile(resolveLockfilePath()),
+  });
   g[SINGLETON_KEY] = created;
   return created;
 }

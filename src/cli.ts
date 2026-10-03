@@ -121,7 +121,10 @@ export async function main(): Promise<void> {
   );
   webP.option("--host <host>", "绑定地址（默认仅本机）", "127.0.0.1");
   webP.option("--port <port>", "端口", pyIntArg, 3000);
-  webP.option("--token <token>", "访问 token（缺省自动生成并打印）");
+  webP.option(
+    "--token <token>",
+    "访问 token（--host 为非回环地址时必填；回环绑定缺省自动生成并打印）",
+  );
   webP.action(async (opts) => {
     await cmdWeb(opts.mode, opts.host, opts.port, opts.token);
   });
@@ -544,12 +547,56 @@ function pyValueRepr(v: unknown): string {
 // ---- web ---------------------------------------------------------------------
 
 /**
+ * web 绑定安全闸（D6）：校验 `--host` 与 `--token` 的组合是否允许启动。
+ *
+ * - 回环地址（`localhost` / `127.*` / `::1`）直接放行并返回 `true`；
+ * - 非回环 + 未显式提供 token → 抛中文 Error 拒绝启动
+ *   （自动生成 token + 内网暴露属高危组合）；
+ * - 非回环 + 显式 token → 打印多行风险横幅并返回 `false`（暴露风险由调用方自担）。
+ *
+ * 除 `logger.warning` 外无副作用，供 `cmdWeb` 与测试直接调用。
+ *
+ * @param host `--host` 的值（原样比对，不做 DNS 解析）。
+ * @param hasExplicitToken 调用方是否显式传入了 `--token`（`undefined` 即未提供）。
+ * @returns 是否为回环绑定：`true` = 仅本机可见；`false` = 非回环、已确认暴露风险。
+ * @throws 非回环地址且未显式提供 token 时，抛出含补救指引的中文 Error。
+ */
+export function assertWebBinding(host: string, hasExplicitToken: boolean): boolean {
+  const loopback = host === "localhost" || host.startsWith("127.") || host === "::1";
+  if (loopback) {
+    return true;
+  }
+  if (!hasExplicitToken) {
+    throw new Error(
+      `拒绝启动：绑定非回环地址 ${host} 时必须显式提供 --token。` +
+        "自动生成 token + 内网暴露属高危组合——局域网内任何拿到 token 的人都能操控你的手机/模拟器。" +
+        "请改用默认 127.0.0.1，或 --token <自定义高熵token> 并阅读 docs/web-console-remote.md。",
+    );
+  }
+  logger.warning(
+    [
+      "┌────────────────────── 远程访问风险提示 ──────────────────────┐",
+      `│ ① 当前绑定 ${host} 为非回环地址：控制台对所在网段可见。`,
+      "│ ② 持有 token 者可完全操控设备（UI dump、截图、抢票任务流程）。",
+      "│ ③ 自动支付边界不因网络暴露而改变（控制台不触发支付），",
+      "│    但设备仍可被远程操纵（点击、输入、安装等）。",
+      "│ ④ 建议：反向代理终结 TLS + 防火墙仅放行可信源 IP。",
+      "│ ⑤ 详见 docs/web-console-remote.md（反代/HTTPS/防火墙/最小暴露建议）。",
+      "└──────────────────────────────────────────────────────────────┘",
+    ].join("\n"),
+  );
+  return false;
+}
+
+/**
  * web 子命令：启动可视化控制台（Next.js 16 全栈应用，位于仓库根 `web/`）。
  *
- * 安全护栏（docs/plans/web-console-plan.md D6）：
- * - 默认绑定 127.0.0.1；`--host` 指向非回环地址时打印醒目警告；
- * - token 未显式提供时自动生成并打印，经 `DAMAI_WEB_TOKEN` 注入 Next 进程，
- *   由 `web/src/middleware.ts` 校验（x-web-token 头或 /api/token 换取的 Cookie）。
+ * 安全护栏（docs/plans/web-console-plan.md D6，经 {@link assertWebBinding} 落实）：
+ * - 默认绑定 127.0.0.1；`--host` 指向非回环地址且未显式提供 `--token` 时拒绝启动；
+ * - 非回环 + 显式 token 时打印多行风险横幅；
+ * - 回环绑定下 token 未显式提供时自动生成并打印（自动生成仅限回环），
+ *   经 `DAMAI_WEB_TOKEN` 注入 Next 进程，由 `web/src/proxy.ts` 校验
+ *   （x-web-token 头或 /api/token 换取的 Cookie）。
  */
 async function cmdWeb(
   mode: "dev" | "start",
@@ -557,6 +604,8 @@ async function cmdWeb(
   port: number,
   token?: string,
 ): Promise<void> {
+  // 安全闸先于一切副作用：非回环 + 未显式 token 直接拒绝启动（D6）
+  const loopback = assertWebBinding(host, token !== undefined);
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const webRoot = join(repoRoot, "web");
   const nextEntry = join(webRoot, "node_modules", "next", "dist", "bin", "next");
@@ -569,14 +618,11 @@ async function cmdWeb(
     );
   }
 
+  // 走到这里 token===undefined 只可能出现在回环绑定（非回环已被安全闸拒绝）
   const effectiveToken = token ?? randomBytes(16).toString("hex");
-  const loopback = host === "localhost" || host.startsWith("127.") || host === "::1";
-  if (!loopback) {
-    logger.warning(
-      `web 控制台绑定在非回环地址 ${host}：局域网内任何持有 token 的人都能操控你的手机/模拟器！`,
-    );
-  }
-  logger.info(`web 控制台: http://${host}:${port} (mode=${mode})`);
+  logger.info(
+    `web 控制台: http://${host}:${port} (mode=${mode}${loopback ? "，仅本机可访问" : "，对所在网段可见"})`,
+  );
   logger.info(
     `访问 token: ${effectiveToken}  （浏览器打开 /api/token?token=<token> 换取 Cookie，或请求携带 x-web-token 头）`,
   );

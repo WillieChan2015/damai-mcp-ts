@@ -10,8 +10,8 @@ const nextConfig: NextConfig = {
     root: repoRoot,
   },
   // core 的服务端依赖含 worker_threads / 原生资源，交给 Node 运行时 require，
-  // 不参与打包（pino 的 thread-stream 打进 bundle 会崩）。
-  serverExternalPackages: ["pino", "pino-roll", "jimp"],
+  // 不参与打包（pino 的 thread-stream 打进 bundle 会崩；better-sqlite3 是原生模块）。
+  serverExternalPackages: ["pino", "pino-roll", "jimp", "better-sqlite3"],
 };
 
 export default nextConfig;

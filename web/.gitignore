@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# 任务持久化（运行时 SQLite，勿提交；.gitkeep 保留）
+/data/tasks.db*

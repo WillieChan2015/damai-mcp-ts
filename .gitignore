@@ -40,3 +40,6 @@ Thumbs.db
 # APK 文件（太大不入仓，发布到 releases 即可）
 apks/
 *.apk
+
+# Web 控制台运行时（D4 跨进程设备锁）
+.damai-web.lock
